@@ -109,24 +109,65 @@ def login():
 
 @app.route('/cron/bse_announcements')
 def cron_bse_announcements():
-    """Cron-compatible endpoint to send BSE announcements every 5 minutes.
+    """Cron-compatible endpoint to send BSE announcements.
     Expects a secret key in query string (?key=...) to prevent abuse.
+    Optionally accepts hours_back (default 1).
+
+    This endpoint iterates over all users who have both monitored scrips and
+    at least one Telegram recipient, and sends consolidated announcements.
     """
     key = request.args.get('key')
     expected = os.environ.get('CRON_SECRET_KEY')
     if not expected or key != expected:
         return "Unauthorized", 403
 
-    sb_client = get_authenticated_client() or db.get_supabase_client(service_role=True)
-    if not sb_client:
+    # Always use service client for cron
+    sb = db.get_supabase_client(service_role=True)
+    if not sb:
         return "Supabase not configured", 500
 
-    user_id = session.get('user_id') or 'system'
     try:
-        monitored_scrips = db.get_user_scrips(sb_client, user_id)
-        telegram_recipients = db.get_user_recipients(sb_client, user_id)
-        sent = db.send_bse_announcements_consolidated(sb_client, user_id, monitored_scrips, telegram_recipients, hours_back=1)
-        return jsonify({"ok": True, "sent": sent})
+        # Allow overriding hours_back via query param (default: 1 hour)
+        try:
+            hours_back = int(request.args.get('hours_back', '1'))
+        except Exception:
+            hours_back = 1
+
+        # Fetch all scrips and recipients once
+        scrip_rows = sb.table('monitored_scrips').select('user_id, bse_code, company_name').execute().data or []
+        rec_rows = sb.table('telegram_recipients').select('user_id, chat_id').execute().data or []
+
+        # Build maps by user
+        scrips_by_user = {}
+        for r in scrip_rows:
+            uid = r.get('user_id')
+            if not uid:
+                continue
+            scrips_by_user.setdefault(uid, []).append({'bse_code': r.get('bse_code'), 'company_name': r.get('company_name')})
+
+        recs_by_user = {}
+        for r in rec_rows:
+            uid = r.get('user_id')
+            if not uid:
+                continue
+            recs_by_user.setdefault(uid, []).append({'chat_id': r.get('chat_id')})
+
+        totals = {"users_processed": 0, "notifications_sent": 0, "users_skipped": 0}
+        errors = []
+
+        for uid, scrips in scrips_by_user.items():
+            recipients = recs_by_user.get(uid) or []
+            if not scrips or not recipients:
+                totals["users_skipped"] += 1
+                continue
+            try:
+                sent = db.send_bse_announcements_consolidated(sb, uid, scrips, recipients, hours_back=hours_back)
+                totals["users_processed"] += 1
+                totals["notifications_sent"] += sent
+            except Exception as e:
+                errors.append({"user_id": uid, "error": str(e)})
+
+        return jsonify({"ok": True, **totals, "errors": errors})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 

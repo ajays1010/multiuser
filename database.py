@@ -458,8 +458,14 @@ def db_seen_announcement_exists(user_client, user_id: str, news_id: str) -> bool
             .execute()
         )
         return (getattr(resp, 'count', 0) or 0) > 0
-    except Exception:
-        return True
+    except Exception as e:
+        # If the table doesn't exist yet or any error occurs, do NOT block sending.
+        # We return False so announcements are treated as new.
+        try:
+            print(f"seen_announcements lookup failed, treating as new: {e}")
+        except Exception:
+            pass
+        return False
 
 def db_save_seen_announcement(user_client, user_id: str, news_id: str, scrip_code: str, headline: str, pdf_name: str, ann_dt_iso: str, caption: str):
     try:

@@ -1,0 +1,431 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Stock Sentiment Analysis - Pulse360</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+    <style>
+        .sentiment-card {
+            transition: transform 0.2s;
+            border-radius: 15px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+        .sentiment-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 8px 15px rgba(0, 0, 0, 0.2);
+        }
+        .sentiment-positive { border-left: 5px solid #28a745; }
+        .sentiment-negative { border-left: 5px solid #dc3545; }
+        .sentiment-neutral { border-left: 5px solid #6c757d; }
+        .loading-spinner {
+            display: none;
+            text-align: center;
+            padding: 20px;
+        }
+        .chart-container {
+            background: white;
+            border-radius: 10px;
+            padding: 20px;
+            margin: 20px 0;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+        }
+        .summary-stats {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border-radius: 15px;
+            padding: 20px;
+            margin: 20px 0;
+        }
+        .nav-tabs .nav-link {
+            border-radius: 10px 10px 0 0;
+            margin-right: 5px;
+        }
+        .nav-tabs .nav-link.active {
+            background-color: #007bff;
+            color: white;
+            border-color: #007bff;
+        }
+    </style>
+</head>
+<body class="bg-light">
+    <nav class="navbar navbar-expand-lg navbar-dark bg-primary">
+        <div class="container">
+            <a class="navbar-brand" href="/">
+                <i class="fas fa-chart-line me-2"></i>Pulse360
+            </a>
+            <div class="navbar-nav ms-auto">
+                <span class="navbar-text me-3">
+                    <i class="fas fa-user me-1"></i>{{ user_email }}
+                </span>
+                <a class="nav-link" href="/">
+                    <i class="fas fa-tachometer-alt me-1"></i>Dashboard
+                </a>
+                <a class="nav-link active" href="/sentiment_analysis">
+                    <i class="fas fa-brain me-1"></i>Sentiment
+                </a>
+                <a class="nav-link" href="/admin" target="_blank">
+                    <i class="fas fa-cog me-1"></i>Admin
+                </a>
+                <a class="nav-link" href="/logout">
+                    <i class="fas fa-sign-out-alt me-1"></i>Logout
+                </a>
+            </div>
+        </div>
+    </nav>
+
+    <div class="container mt-4">
+        <div class="row">
+            <div class="col-12">
+                <div class="d-flex justify-content-between align-items-center mb-4">
+                    <h1><i class="fas fa-brain me-2"></i>Stock Sentiment Analysis</h1>
+                    <button class="btn btn-success" onclick="refreshSummary()">
+                        <i class="fas fa-sync-alt me-1"></i>Refresh Summary
+                    </button>
+                </div>
+                
+                <!-- Stock Selection -->
+                <div class="card sentiment-card mb-4">
+                    <div class="card-header bg-primary text-white">
+                        <h5 class="mb-0"><i class="fas fa-search me-2"></i>Select Stock for Analysis</h5>
+                    </div>
+                    <div class="card-body">
+                        <div class="row">
+                            <div class="col-md-4">
+                                <label for="stockSelect" class="form-label">Choose Stock:</label>
+                                <select class="form-select" id="stockSelect">
+                                    <option value="">Select a stock...</option>
+                                    {% for scrip in scrips %}
+                                    <option value="{{ scrip.bse_code }}" data-company="{{ scrip.company_name }}">
+                                        {{ scrip.company_name }} ({{ scrip.bse_code }})
+                                    </option>
+                                    {% endfor %}
+                                </select>
+                            </div>
+                            <div class="col-md-4">
+                                <label for="timeRange" class="form-label">Time Range:</label>
+                                <select class="form-select" id="timeRange">
+                                    <option value="6">Last 6 Hours</option>
+                                    <option value="12">Last 12 Hours</option>
+                                    <option value="24" selected>Last 24 Hours</option>
+                                    <option value="48">Last 48 Hours</option>
+                                </select>
+                            </div>
+                            <div class="col-md-4">
+                                <label class="form-label">&nbsp;</label>
+                                <button class="btn btn-primary w-100" onclick="analyzeSelectedStock()">
+                                    <i class="fas fa-chart-line me-1"></i>Analyze Sentiment
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Loading Spinner -->
+                <div class="loading-spinner" id="loadingSpinner">
+                    <div class="spinner-border text-primary" role="status">
+                        <span class="visually-hidden">Loading...</span>
+                    </div>
+                    <p class="mt-2">Analyzing sentiment data...</p>
+                </div>
+
+                <!-- Sentiment Summary -->
+                <div class="summary-stats" id="sentimentSummary" style="display: none;">
+                    <h4><i class="fas fa-chart-pie me-2"></i>Sentiment Summary</h4>
+                    <div class="row" id="summaryContent">
+                        <!-- Summary content will be populated here -->
+                    </div>
+                </div>
+
+                <!-- Analysis Results -->
+                <div id="analysisResults" style="display: none;">
+                    <!-- Sentiment Overview -->
+                    <div class="row mb-4" id="sentimentOverview">
+                        <!-- Overview cards will be populated here -->
+                    </div>
+
+                    <!-- Charts -->
+                    <div class="row">
+                        <div class="col-12">
+                            <ul class="nav nav-tabs" id="chartTabs" role="tablist">
+                                <li class="nav-item" role="presentation">
+                                    <button class="nav-link active" id="heatmap-tab" data-bs-toggle="tab" data-bs-target="#heatmap" type="button" role="tab">
+                                        <i class="fas fa-th me-1"></i>Sentiment Heatmap
+                                    </button>
+                                </li>
+                                <li class="nav-item" role="presentation">
+                                    <button class="nav-link" id="timeline-tab" data-bs-toggle="tab" data-bs-target="#timeline" type="button" role="tab">
+                                        <i class="fas fa-clock me-1"></i>Sentiment Timeline
+                                    </button>
+                                </li>
+                            </ul>
+                            
+                            <div class="tab-content" id="chartTabContent">
+                                <div class="tab-pane fade show active" id="heatmap" role="tabpanel">
+                                    <div class="chart-container">
+                                        <div id="heatmapChart"></div>
+                                    </div>
+                                </div>
+                                <div class="tab-pane fade" id="timeline" role="tabpanel">
+                                    <div class="chart-container">
+                                        <div id="timelineChart"></div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Raw Data -->
+                    <div class="card sentiment-card mt-4">
+                        <div class="card-header bg-info text-white">
+                            <h5 class="mb-0"><i class="fas fa-database me-2"></i>Raw Sentiment Data</h5>
+                        </div>
+                        <div class="card-body">
+                            <div class="table-responsive">
+                                <table class="table table-striped" id="sentimentTable">
+                                    <thead>
+                                        <tr>
+                                            <th>Time</th>
+                                            <th>Source</th>
+                                            <th>Text</th>
+                                            <th>Sentiment</th>
+                                            <th>Score</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="sentimentTableBody">
+                                        <!-- Table content will be populated here -->
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        let currentAnalysisData = null;
+
+        // Initialize page
+        document.addEventListener('DOMContentLoaded', function() {
+            refreshSummary();
+        });
+
+        function analyzeSelectedStock() {
+            const stockSelect = document.getElementById('stockSelect');
+            const timeRange = document.getElementById('timeRange');
+            
+            if (!stockSelect.value) {
+                alert('Please select a stock first.');
+                return;
+            }
+
+            const stockSymbol = stockSelect.value;
+            const companyName = stockSelect.options[stockSelect.selectedIndex].dataset.company;
+            const hoursBack = parseInt(timeRange.value);
+
+            showLoading(true);
+            
+            fetch('/analyze_sentiment', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    stock_symbol: stockSymbol,
+                    company_name: companyName,
+                    hours_back: hoursBack
+                })
+            })
+            .then(response => response.json())
+            .then(data => {
+                showLoading(false);
+                if (data.success) {
+                    displayAnalysisResults(data);
+                } else {
+                    alert('Error: ' + data.error);
+                }
+            })
+            .catch(error => {
+                showLoading(false);
+                console.error('Error:', error);
+                alert('Error analyzing sentiment. Please try again.');
+            });
+        }
+
+        function displayAnalysisResults(data) {
+            currentAnalysisData = data;
+            
+            // Display sentiment overview
+            displaySentimentOverview(data.sentiment_data);
+            
+            // Display charts
+            displayCharts(data.visualizations);
+            
+            // Display raw data table
+            displayRawData(data.sentiment_data);
+            
+            // Show results section
+            document.getElementById('analysisResults').style.display = 'block';
+            
+            // Scroll to results
+            document.getElementById('analysisResults').scrollIntoView({ behavior: 'smooth' });
+        }
+
+        function displaySentimentOverview(sentimentData) {
+            const overviewDiv = document.getElementById('sentimentOverview');
+            
+            // Calculate statistics
+            const totalItems = sentimentData.length;
+            const positiveCount = sentimentData.filter(item => item.sentiment_label === 'Positive').length;
+            const negativeCount = sentimentData.filter(item => item.sentiment_label === 'Negative').length;
+            const neutralCount = sentimentData.filter(item => item.sentiment_label === 'Neutral').length;
+            
+            const avgSentiment = sentimentData.reduce((sum, item) => sum + item.sentiment_score, 0) / totalItems;
+            
+            overviewDiv.innerHTML = `
+                <div class="col-md-3">
+                    <div class="card sentiment-card text-center">
+                        <div class="card-body">
+                            <h3 class="text-primary">${totalItems}</h3>
+                            <p class="mb-0">Total Data Points</p>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-md-3">
+                    <div class="card sentiment-card text-center">
+                        <div class="card-body">
+                            <h3 class="text-success">${positiveCount}</h3>
+                            <p class="mb-0">Positive</p>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-md-3">
+                    <div class="card sentiment-card text-center">
+                        <div class="card-body">
+                            <h3 class="text-danger">${negativeCount}</h3>
+                            <p class="mb-0">Negative</p>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-md-3">
+                    <div class="card sentiment-card text-center">
+                        <div class="card-body">
+                            <h3 class="text-info">${avgSentiment.toFixed(3)}</h3>
+                            <p class="mb-0">Avg Sentiment</p>
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+
+        function displayCharts(visualizations) {
+            // Display heatmap
+            if (visualizations.heatmap) {
+                const heatmapData = JSON.parse(visualizations.heatmap);
+                if (heatmapData && heatmapData.data && heatmapData.layout) {
+                    Plotly.newPlot('heatmapChart', heatmapData.data, heatmapData.layout);
+                } else {
+                    document.getElementById('heatmapChart').innerHTML = '<div class="text-muted">Heatmap unavailable (Plotly not installed).</div>';
+                }
+            }
+            
+            // Display timeline
+            if (visualizations.timeline) {
+                const timelineData = JSON.parse(visualizations.timeline);
+                if (timelineData && timelineData.data && timelineData.layout) {
+                    Plotly.newPlot('timelineChart', timelineData.data, timelineData.layout);
+                } else {
+                    document.getElementById('timelineChart').innerHTML = '<div class="text-muted">Timeline unavailable (Plotly not installed).</div>';
+                }
+            }
+        }
+
+        function displayRawData(sentimentData) {
+            const tableBody = document.getElementById('sentimentTableBody');
+            
+            tableBody.innerHTML = sentimentData.map(item => `
+                <tr>
+                    <td>${new Date(item.timestamp).toLocaleString()}</td>
+                    <td>
+                        <span class="badge bg-${item.source === 'twitter' ? 'primary' : 'success'}">
+                            ${item.source}
+                        </span>
+                    </td>
+                    <td>${item.text}</td>
+                    <td>
+                        <span class="badge bg-${getSentimentColor(item.sentiment_label)}">
+                            ${item.sentiment_label}
+                        </span>
+                    </td>
+                    <td>${item.sentiment_score.toFixed(3)}</td>
+                </tr>
+            `).join('');
+        }
+
+        function getSentimentColor(label) {
+            switch(label) {
+                case 'Positive': return 'success';
+                case 'Negative': return 'danger';
+                default: return 'secondary';
+            }
+        }
+
+        function refreshSummary() {
+            fetch('/get_sentiment_summary')
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    displaySummary(data.summary_data);
+                }
+            })
+            .catch(error => {
+                console.error('Error fetching summary:', error);
+            });
+        }
+
+        function displaySummary(summaryData) {
+            const summaryDiv = document.getElementById('sentimentSummary');
+            const contentDiv = document.getElementById('summaryContent');
+            
+            if (summaryData.length === 0) {
+                summaryDiv.style.display = 'none';
+                return;
+            }
+            
+            contentDiv.innerHTML = summaryData.map(item => `
+                <div class="col-md-4 mb-3">
+                    <div class="card sentiment-card ${getSentimentCardClass(item.sentiment_score)}">
+                        <div class="card-body text-center">
+                            <h6 class="card-title">${item.company_name}</h6>
+                            <p class="mb-1">
+                                <span class="badge bg-${getSentimentColor(item.mood)}">${item.mood}</span>
+                            </p>
+                            <p class="mb-1">Score: ${item.sentiment_score.toFixed(3)}</p>
+                            <p class="mb-1">Confidence: ${item.confidence.toFixed(1)}%</p>
+                            <small class="text-muted">${item.data_points} data points</small>
+                        </div>
+                    </div>
+                </div>
+            `).join('');
+            
+            summaryDiv.style.display = 'block';
+        }
+
+        function getSentimentCardClass(score) {
+            if (score > 0.1) return 'sentiment-positive';
+            if (score < -0.1) return 'sentiment-negative';
+            return 'sentiment-neutral';
+        }
+
+        function showLoading(show) {
+            const spinner = document.getElementById('loadingSpinner');
+            spinner.style.display = show ? 'block' : 'none';
+        }
+    </script>
+</body>
+</html>

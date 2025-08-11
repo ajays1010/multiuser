@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Login</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Import the Firebase SDK -->
+    <script src="https://www.gstatic.com/firebasejs/9.6.1/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/9.6.1/firebase-auth-compat.js"></script>
+</head>
+<body class="bg-gray-100 flex items-center justify-center h-screen">
+    <div class="bg-white p-8 rounded-lg shadow-md w-96">
+        <h1 class="text-2xl font-bold mb-6 text-center">BSE Bot Login</h1>
+        <div id="message-area" class="mb-4"></div>
+
+        <!-- Sign in with Google Button -->
+        <button id="google-login-btn" class="w-full bg-white border border-gray-300 text-gray-700 p-2 rounded hover:bg-gray-50 flex items-center justify-center mb-4">
+            <img src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/auth/google.svg" alt="Google logo" class="w-5 h-5 mr-2">
+            Sign in with Google
+        </button>
+
+        <div class="relative flex py-2 items-center">
+            <div class="flex-grow border-t border-gray-300"></div>
+            <span class="flex-shrink mx-4 text-gray-400">OR</span>
+            <div class="flex-grow border-t border-gray-300"></div>
+        </div>
+
+        <!-- Step 1: Enter Phone Number -->
+        <div id="phone-entry">
+            <input id="phone-number" type="tel" placeholder="+91 12345 67890" class="w-full p-2 mb-4 border rounded mt-4">
+            <div id="recaptcha-container"></div>
+            <button id="send-otp-btn" class="w-full bg-blue-500 text-white p-2 rounded hover:bg-blue-600">Sign in with Phone</button>
+        </div>
+
+        <!-- Step 2: Enter OTP -->
+        <div id="otp-entry" class="hidden">
+            <input id="otp-code" type="text" placeholder="Enter OTP" class="w-full p-2 mb-4 border rounded">
+            <button id="verify-otp-btn" class="w-full bg-green-500 text-white p-2 rounded hover:bg-green-600">Verify & Login</button>
+        </div>
+    </div>
+
+    <script>
+        // --- IMPORTANT: Replace with your Firebase project's configuration ---
+        const firebaseConfig = {
+            // TODO: set from backend config or env in production
+            apiKey: "AIzaSyACFA-8Yxdmnl2wzmd3xndJ-G3YvySQbPY",
+ 	    authDomain: "bsemonitoring-64a8e.firebaseapp.com",
+  	    projectId: "bsemonitoring-64a8e",
+  	    storageBucket: "bsemonitoring-64a8e.firebasestorage.app",
+  	    messagingSenderId: "987523299575",
+  	    appId: "1:987523299575:web:1a6d9e96b564f11ae6fbf2"
+        };
+        firebase.initializeApp(firebaseConfig);
+
+        const auth = firebase.auth();
+        const googleLoginBtn = document.getElementById('google-login-btn');
+        const phoneEntryDiv = document.getElementById('phone-entry');
+        const otpEntryDiv = document.getElementById('otp-entry');
+        const phoneNumberInput = document.getElementById('phone-number');
+        const sendOtpBtn = document.getElementById('send-otp-btn');
+        const otpCodeInput = document.getElementById('otp-code');
+        const verifyOtpBtn = document.getElementById('verify-otp-btn');
+        const messageArea = document.getElementById('message-area');
+
+        // Setup reCAPTCHA verifier
+        window.recaptchaVerifier = new firebase.auth.RecaptchaVerifier('recaptcha-container', {
+            'size': 'invisible'
+        });
+
+        // --- Google Login Logic ---
+        googleLoginBtn.addEventListener('click', () => {
+            const provider = new firebase.auth.GoogleAuthProvider();
+            provider.addScope('email');
+            provider.addScope('profile');
+            provider.setCustomParameters({ prompt: 'consent', access_type: 'online' });
+            auth.signInWithPopup(provider)
+                .then((result) => result.user.getIdToken())
+                .then((idToken) => sendTokenToBackend(idToken, '/verify_google_token'))
+                .catch((error) => showMessage(`Error: ${error.message}`, 'red'));
+        });
+
+        // --- Phone Login Logic ---
+        sendOtpBtn.addEventListener('click', () => {
+            const phoneNumber = phoneNumberInput.value;
+            const appVerifier = window.recaptchaVerifier;
+            
+            auth.signInWithPhoneNumber(phoneNumber, appVerifier)
+                .then((confirmationResult) => {
+                    window.confirmationResult = confirmationResult;
+                    showMessage('OTP sent successfully!', 'green');
+                    phoneEntryDiv.classList.add('hidden');
+                    googleLoginBtn.classList.add('hidden');
+                    document.querySelector('.relative.flex').classList.add('hidden');
+                    otpEntryDiv.classList.remove('hidden');
+                }).catch((error) => {
+                    showMessage(`Error: ${error.message}`, 'red');
+                    recaptchaVerifier.render().then(widgetId => grecaptcha.reset(widgetId));
+                });
+        });
+
+        verifyOtpBtn.addEventListener('click', () => {
+            const code = otpCodeInput.value;
+            confirmationResult.confirm(code)
+                .then((result) => result.user.getIdToken())
+                .then((idToken) => sendTokenToBackend(idToken, '/verify_phone_token'))
+                .catch((error) => showMessage(`Error: ${error.message}`, 'red'));
+        });
+
+        function sendTokenToBackend(idToken, endpoint) {
+            fetch(endpoint, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ token: idToken })
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    showMessage('Login successful! Redirecting...', 'green');
+                    window.location.href = "/"; // Redirect to dashboard
+                } else {
+                    throw new Error(data.error || 'Backend verification failed.');
+                }
+            })
+            .catch(error => showMessage(`Error: ${error.message}`, 'red'));
+        }
+
+        function showMessage(msg, color) {
+            messageArea.innerHTML = `<div class="bg-${color}-100 text-${color}-700 p-3 rounded">${msg}</div>`;
+        }
+    </script>
+</body>
+</html>

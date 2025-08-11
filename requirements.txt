@@ -13,3 +13,4 @@ numpy>=1.16.5
 plotly==6.2.0
 beautifulsoup4>=4.11.1
 lxml>=4.9.1
+gunicorn==21.2.0

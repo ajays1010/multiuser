@@ -15,6 +15,9 @@ app = Flask(__name__)
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", "a-super-secret-key-for-local-testing")
 app.register_blueprint(admin_bp)
 
+# Ensure Firebase Admin SDK is initialized when the app starts (works under Gunicorn too)
+db.initialize_firebase()
+
 # --- Load local company data into memory for searching ---
 try:
     company_df = pd.read_csv('indian_stock_tickers.csv')
@@ -104,8 +107,6 @@ def login():
     """Renders the new unified login page."""
     return render_template('login_unified.html')
 
-@app.route('/verify_phone_token', methods=['POST'])
-
 @app.route('/cron/bse_announcements')
 def cron_bse_announcements():
     """Cron-compatible endpoint to send BSE announcements every 5 minutes.
@@ -129,6 +130,7 @@ def cron_bse_announcements():
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 
+@app.route('/verify_phone_token', methods=['POST'])
 def verify_phone_token():
     """Endpoint for verifying Firebase phone auth tokens."""
     return _process_firebase_token()
@@ -345,6 +347,11 @@ def get_sentiment_summary(sb):
     except Exception as e:
         print(f"Error in get_sentiment_summary: {e}")
         return jsonify({'error': str(e)}), 500
+
+# --- Health Check ---
+@app.route('/health')
+def health():
+    return 'ok', 200
 
 # --- Main Execution ---
 if __name__ == '__main__':

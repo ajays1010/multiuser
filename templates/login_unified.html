@@ -1,53 +1,72 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
+    <meta charset="UTF-8">
+    <!-- This tag is essential for mobile-friendly design -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Login</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <!-- Import the Firebase SDK -->
     <script src="https://www.gstatic.com/firebasejs/9.6.1/firebase-app-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/9.6.1/firebase-auth-compat.js"></script>
+    <style>
+        /* A little extra style for better visual feedback */
+        .btn-primary {
+            @apply w-full text-white p-3 rounded-lg font-semibold transition-transform transform hover:scale-105;
+        }
+    </style>
 </head>
-<body class="bg-gray-100 flex items-center justify-center h-screen">
-    <div class="bg-white p-8 rounded-lg shadow-md w-96">
-        <h1 class="text-2xl font-bold mb-6 text-center">BSE Bot Login</h1>
-        <div id="message-area" class="mb-4"></div>
+<body class="bg-gray-100 flex items-center justify-center min-h-screen p-4">
+    <!-- 
+      Key Changes for Responsiveness:
+      - w-full: Takes up the full width on small screens.
+      - max-w-md: Limits the maximum width on larger screens (desktops) to keep the form readable.
+      - p-6 sm:p-8: Uses slightly less padding on very small screens.
+    -->
+    <div class="bg-white p-6 sm:p-8 rounded-xl shadow-lg w-full max-w-md">
+        <h1 class="text-2xl sm:text-3xl font-bold mb-6 text-center text-gray-800">BSE Bot Login</h1>
+        
+        <!-- Area for success/error messages -->
+        <div id="message-area" class="mb-4 text-sm"></div>
 
         <!-- Sign in with Google Button -->
-        <button id="google-login-btn" class="w-full bg-white border border-gray-300 text-gray-700 p-2 rounded hover:bg-gray-50 flex items-center justify-center mb-4">
-            <img src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/auth/google.svg" alt="Google logo" class="w-5 h-5 mr-2">
+        <button id="google-login-btn" class="w-full bg-white border border-gray-300 text-gray-700 p-3 rounded-lg hover:bg-gray-50 flex items-center justify-center mb-4 font-semibold transition-colors">
+            <img src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/auth/google.svg" alt="Google logo" class="w-5 h-5 mr-3">
             Sign in with Google
         </button>
 
-        <div class="relative flex py-2 items-center">
-            <div class="flex-grow border-t border-gray-300"></div>
-            <span class="flex-shrink mx-4 text-gray-400">OR</span>
-            <div class="flex-grow border-t border-gray-300"></div>
+        <!-- "OR" divider -->
+        <div class="relative flex py-3 items-center">
+            <div class="flex-grow border-t border-gray-200"></div>
+            <span class="flex-shrink mx-4 text-gray-400 text-xs uppercase">OR</span>
+            <div class="flex-grow border-t border-gray-200"></div>
         </div>
 
         <!-- Step 1: Enter Phone Number -->
         <div id="phone-entry">
-            <input id="phone-number" type="tel" placeholder="+91 12345 67890" class="w-full p-2 mb-4 border rounded mt-4">
+            <input id="phone-number" type="tel" placeholder="+91 12345 67890" class="w-full p-3 mb-4 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
             <div id="recaptcha-container"></div>
-            <button id="send-otp-btn" class="w-full bg-blue-500 text-white p-2 rounded hover:bg-blue-600">Sign in with Phone</button>
+            <button id="send-otp-btn" class="btn-primary bg-blue-500 hover:bg-blue-600">Sign in with Phone</button>
         </div>
 
         <!-- Step 2: Enter OTP -->
         <div id="otp-entry" class="hidden">
-            <input id="otp-code" type="text" placeholder="Enter OTP" class="w-full p-2 mb-4 border rounded">
-            <button id="verify-otp-btn" class="w-full bg-green-500 text-white p-2 rounded hover:bg-green-600">Verify & Login</button>
+            <p class="text-center text-gray-600 mb-2">Enter the OTP sent to your phone.</p>
+            <input id="otp-code" type="text" placeholder="Enter OTP" class="w-full p-3 mb-4 border border-gray-300 rounded-lg text-center tracking-widest text-lg focus:ring-2 focus:ring-green-500 focus:border-green-500">
+            <button id="verify-otp-btn" class="btn-primary bg-green-500 hover:bg-green-600">Verify & Login</button>
         </div>
     </div>
 
     <script>
         // --- IMPORTANT: Replace with your Firebase project's configuration ---
         const firebaseConfig = {
-            // TODO: set from backend config or env in production
+            // It's recommended to load this from your backend or environment variables in production
             apiKey: "AIzaSyACFA-8Yxdmnl2wzmd3xndJ-G3YvySQbPY",
- 	    authDomain: "bsemonitoring-64a8e.firebaseapp.com",
-  	    projectId: "bsemonitoring-64a8e",
-  	    storageBucket: "bsemonitoring-64a8e.firebasestorage.app",
-  	    messagingSenderId: "987523299575",
-  	    appId: "1:987523299575:web:1a6d9e96b564f11ae6fbf2"
+            authDomain: "bsemonitoring-64a8e.firebaseapp.com",
+            projectId: "bsemonitoring-64a8e",
+            storageBucket: "bsemonitoring-64a8e.firebasestorage.app",
+            messagingSenderId: "987523299575",
+            appId: "1:987523299575:web:1a6d9e96b564f11ae6fbf2"
         };
         firebase.initializeApp(firebaseConfig);
 
@@ -61,7 +80,7 @@
         const verifyOtpBtn = document.getElementById('verify-otp-btn');
         const messageArea = document.getElementById('message-area');
 
-        // Setup reCAPTCHA verifier
+        // Setup reCAPTCHA verifier for phone auth
         window.recaptchaVerifier = new firebase.auth.RecaptchaVerifier('recaptcha-container', {
             'size': 'invisible'
         });
@@ -71,7 +90,6 @@
             const provider = new firebase.auth.GoogleAuthProvider();
             provider.addScope('email');
             provider.addScope('profile');
-            provider.setCustomParameters({ prompt: 'consent', access_type: 'online' });
             auth.signInWithPopup(provider)
                 .then((result) => result.user.getIdToken())
                 .then((idToken) => sendTokenToBackend(idToken, '/verify_google_token'))
@@ -81,31 +99,45 @@
         // --- Phone Login Logic ---
         sendOtpBtn.addEventListener('click', () => {
             const phoneNumber = phoneNumberInput.value;
+            if (!phoneNumber) {
+                showMessage('Please enter a phone number.', 'red');
+                return;
+            }
             const appVerifier = window.recaptchaVerifier;
             
             auth.signInWithPhoneNumber(phoneNumber, appVerifier)
                 .then((confirmationResult) => {
                     window.confirmationResult = confirmationResult;
                     showMessage('OTP sent successfully!', 'green');
+                    // Hide other login options and show OTP entry
                     phoneEntryDiv.classList.add('hidden');
                     googleLoginBtn.classList.add('hidden');
                     document.querySelector('.relative.flex').classList.add('hidden');
                     otpEntryDiv.classList.remove('hidden');
                 }).catch((error) => {
                     showMessage(`Error: ${error.message}`, 'red');
-                    recaptchaVerifier.render().then(widgetId => grecaptcha.reset(widgetId));
+                    // Reset reCAPTCHA on error
+                    if (typeof grecaptcha !== 'undefined') {
+                        recaptchaVerifier.render().then(widgetId => grecaptcha.reset(widgetId));
+                    }
                 });
         });
 
         verifyOtpBtn.addEventListener('click', () => {
             const code = otpCodeInput.value;
+            if (!code) {
+                showMessage('Please enter the OTP.', 'red');
+                return;
+            }
             confirmationResult.confirm(code)
                 .then((result) => result.user.getIdToken())
                 .then((idToken) => sendTokenToBackend(idToken, '/verify_phone_token'))
                 .catch((error) => showMessage(`Error: ${error.message}`, 'red'));
         });
 
+        // --- Backend Communication ---
         function sendTokenToBackend(idToken, endpoint) {
+            showMessage('Verifying...', 'blue');
             fetch(endpoint, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -115,7 +147,8 @@
             .then(data => {
                 if (data.success) {
                     showMessage('Login successful! Redirecting...', 'green');
-                    window.location.href = "/"; // Redirect to dashboard
+                    // Redirect to dashboard on success
+                    window.location.href = "/"; 
                 } else {
                     throw new Error(data.error || 'Backend verification failed.');
                 }
@@ -123,8 +156,14 @@
             .catch(error => showMessage(`Error: ${error.message}`, 'red'));
         }
 
+        // --- UI Helper ---
         function showMessage(msg, color) {
-            messageArea.innerHTML = `<div class="bg-${color}-100 text-${color}-700 p-3 rounded">${msg}</div>`;
+            const colorClasses = {
+                red: 'bg-red-100 text-red-700',
+                green: 'bg-green-100 text-green-700',
+                blue: 'bg-blue-100 text-blue-700'
+            };
+            messageArea.innerHTML = `<div class="${colorClasses[color]} p-3 rounded-lg">${msg}</div>`;
         }
     </script>
 </body>

@@ -230,9 +230,11 @@ def dashboard(sb):
     monitored_scrips = db.get_user_scrips(sb, user_id)
     telegram_recipients = db.get_user_recipients(sb, user_id)
     
+    category_prefs = db.get_user_category_prefs(sb, user_id)
     return render_template('dashboard.html', 
                            monitored_scrips=monitored_scrips,
                            telegram_recipients=telegram_recipients,
+                           category_prefs=category_prefs,
                            user_email=session.get('user_email', ''),
                            user_phone=session.get('user_phone', ''))
 
@@ -355,6 +357,18 @@ def delete_recipient(sb):
     chat_id = request.form['chat_id']
     db.delete_user_recipient(sb, user_id, chat_id)
     flash(f'Recipient {chat_id} removed.', 'success')
+    return redirect(url_for('dashboard'))
+
+@app.route('/set_category_prefs', methods=['POST'])
+@login_required
+def set_category_prefs(sb):
+    user_id = session.get('user_id')
+    selected = request.form.getlist('categories')
+    ok = db.set_user_category_prefs(sb, user_id, selected)
+    if ok:
+        flash('Category preferences saved.', 'success')
+    else:
+        flash('Failed to save preferences.', 'error')
     return redirect(url_for('dashboard'))
 
 # --- Sentiment Analysis Routes (Protected) ---

@@ -314,6 +314,41 @@ def find_or_create_supabase_user(decoded_token):
 
 
 # --- User-Specific Data Functions (Remain the same) ---
+
+def get_user_category_prefs(user_client, user_id: str):
+    """Return a list of enabled categories for this user.
+    If no prefs stored, default to all allowed categories.
+    """
+    try:
+        resp = (
+            user_client.table('bse_category_prefs')
+            .select('categories')
+            .eq('user_id', user_id)
+            .single()
+            .execute()
+        )
+        cats = (resp.data or {}).get('categories') if hasattr(resp, 'data') else None
+        if not cats:
+            return list(ALLOWED_ANNOUNCEMENT_CATEGORIES)
+        # Ensure only known categories are returned
+        return [c for c in cats if c in ALLOWED_ANNOUNCEMENT_CATEGORIES]
+    except Exception:
+        return list(ALLOWED_ANNOUNCEMENT_CATEGORIES)
+
+def set_user_category_prefs(user_client, user_id: str, categories: list[str]):
+    """Upsert user category preferences. Filters to allowed set."""
+    try:
+        cats = [c for c in categories if c in ALLOWED_ANNOUNCEMENT_CATEGORIES]
+        payload = {'user_id': user_id, 'categories': cats}
+        # Try update, fallback insert
+        existing = user_client.table('bse_category_prefs').select('user_id').eq('user_id', user_id).limit(1).execute().data or []
+        if existing:
+            user_client.table('bse_category_prefs').update(payload).eq('user_id', user_id).execute()
+        else:
+            user_client.table('bse_category_prefs').insert(payload).execute()
+        return True
+    except Exception:
+        return False
 def get_user_scrips(user_client, user_id: str):
     return (
         user_client
@@ -698,7 +733,7 @@ def classify_bse_headline(headline: str):
 
     return None
 
-def fetch_bse_announcements_for_scrip(scrip_code: str, since_dt) -> list[dict]:
+def fetch_bse_announcements_for_scrip(scrip_code: str, since_dt, allowed_categories: list[str] | None = None) -> list[dict]:
     import requests
     results = []
     try:
@@ -777,6 +812,8 @@ def fetch_bse_announcements_for_scrip(scrip_code: str, since_dt) -> list[dict]:
             category = classify_bse_headline(headline)
             if not category:
                 continue  # ignore announcements outside our categories
+            if allowed_categories is not None and category not in allowed_categories:
+                continue  # filtered out by user preferences
             results.append({
                 'news_id': news_id,
                 'scrip_code': scrip_code,
@@ -808,7 +845,9 @@ def send_bse_announcements_consolidated(user_client, user_id: str, monitored_scr
     all_new = []
     for scrip in monitored_scrips:
         scrip_code = scrip['bse_code']
-        ann = fetch_bse_announcements_for_scrip(scrip_code, since_dt)
+        # Apply per-user category preferences
+        allowed = get_user_category_prefs(user_client, user_id)
+        ann = fetch_bse_announcements_for_scrip(scrip_code, since_dt, allowed_categories=allowed)
         for item in ann:
             if not db_seen_announcement_exists(user_client, user_id, item['news_id']):
                 all_new.append(item)

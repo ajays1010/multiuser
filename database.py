@@ -105,6 +105,33 @@ _YAHOO_SESSION = None
 _YAHOO_CACHE_SERIES = {}
 _YAHOO_CACHE_TTL = int(os.environ.get("YAHOO_CACHE_TTL", "60"))
 
+# Lazy-loaded company dataframe for symbol lookups
+_COMPANY_DF = None
+
+def get_company_df():
+    global _COMPANY_DF
+    if _COMPANY_DF is None:
+        import pandas as pd
+        try:
+            _COMPANY_DF = pd.read_csv('indian_stock_tickers.csv')
+        except Exception:
+            _COMPANY_DF = None
+    return _COMPANY_DF
+
+def bse_code_to_yahoo_symbol(bse_code):
+    df = get_company_df()
+    if df is None:
+        return None
+    try:
+        bse_code_int = int(str(bse_code))
+        row = df[df['BSE Code'] == bse_code_int]
+    except Exception:
+        row = df[df['BSE Code'].astype(str) == str(bse_code)]
+    if row is None or row.empty:
+        return None
+    sym = str(row.iloc[0].get('Yahoo Symbol', '')).strip()
+    return sym or None
+
 def get_yahoo_session():
     global _YAHOO_SESSION
     if _YAHOO_SESSION is None:
@@ -432,6 +459,119 @@ def send_telegram_message(chat_id: str, message: str):
 
 # --- Script Message Functions ---
 
+# --- Hourly price/volume spike alerts ---
+ALERTS_TABLE = 'daily_alerts_sent'
+
+ALERTS_SQL_SCHEMA = """
+-- Suggested schema to create in Supabase
+create table if not exists public.daily_alerts_sent (
+  user_id uuid not null,
+  bse_code text not null,
+  alert_date date not null,
+  alert_type text not null,
+  created_at timestamptz not null default now(),
+  primary key (user_id, bse_code, alert_date, alert_type)
+);
+"""
+
+def _has_sent_alert_today(user_client, user_id: str, bse_code: str, alert_type: str) -> bool:
+    try:
+        from datetime import date
+        today = date.today().isoformat()
+        resp = (
+            user_client.table(ALERTS_TABLE)
+            .select('user_id', count='exact')
+            .eq('user_id', user_id)
+            .eq('bse_code', str(bse_code))
+            .eq('alert_date', today)
+            .eq('alert_type', alert_type)
+            .execute()
+        )
+        return (getattr(resp, 'count', 0) or 0) > 0
+    except Exception:
+        return False
+
+def _record_alert_today(user_client, user_id: str, bse_code: str, alert_type: str):
+    try:
+        from datetime import date
+        today = date.today().isoformat()
+        user_client.table(ALERTS_TABLE).insert({
+            'user_id': user_id,
+            'bse_code': str(bse_code),
+            'alert_date': today,
+            'alert_type': alert_type,
+        }).execute()
+    except Exception:
+        pass
+
+def send_hourly_spike_alerts(user_client, user_id: str, monitored_scrips, telegram_recipients, price_threshold_pct: float = 5.0, volume_threshold_pct: float = 400.0) -> int:
+    """Scan each monitored scrip hourly and send at most one alert per day when:
+    - price change >= |5%| vs previous close, OR
+    - today's volume >= 400% of previous day's volume.
+    Returns number of messages sent.
+    Requires a table 'daily_alerts_sent' with schema in ALERTS_SQL_SCHEMA.
+    """
+    messages_sent = 0
+    if not monitored_scrips or not telegram_recipients:
+        return 0
+
+    # Pre-resolve symbols once
+    symbols = {}
+    for s in monitored_scrips:
+        bse_code = str(s['bse_code'])
+        sym = bse_code_to_yahoo_symbol(bse_code)
+        if sym:
+            symbols[bse_code] = sym
+
+    for s in monitored_scrips:
+        bse_code = str(s['bse_code'])
+        company_name = s.get('company_name') or bse_code
+        sym = symbols.get(bse_code)
+        if not sym:
+            continue
+
+        price_change_pct, volume_spike_pct, price, prev_close, today_vol, prev_vol = _get_price_change_and_volume(sym)
+
+        trigger = None
+        if price_change_pct is not None and abs(price_change_pct) >= price_threshold_pct:
+            trigger = 'price_up' if price_change_pct > 0 else 'price_down'
+        if volume_spike_pct is not None and volume_spike_pct >= volume_threshold_pct:
+            trigger = trigger or 'volume_spike'
+
+        if not trigger:
+            continue
+
+        if _has_sent_alert_today(user_client, user_id, bse_code, trigger):
+            continue
+
+        # Build message
+        def fmt(v):
+            try:
+                return f"{float(v):.2f}"
+            except Exception:
+                return "N/A"
+        arrow = '🔺' if (price_change_pct or 0) >= 0 else '🔻'
+        sign = '+' if (price_change_pct or 0) >= 0 else ''
+        parts = [
+            f"⚠️ Alert: {company_name} ({bse_code})",
+            f"Price: ₹{fmt(price)} ({arrow} {sign}{fmt(price_change_pct)}%) vs prev close ₹{fmt(prev_close)}",
+        ]
+        if volume_spike_pct is not None:
+            parts.append(f"Volume spike: {fmt(volume_spike_pct)}% vs yesterday (today {fmt(today_vol)}, prev {fmt(prev_vol)})")
+        text = "\n".join(parts)
+
+        for rec in telegram_recipients:
+            try:
+                send_telegram_message(rec['chat_id'], text)
+                messages_sent += 1
+            except Exception:
+                pass
+
+        _record_alert_today(user_client, user_id, bse_code, trigger)
+
+    return messages_sent
+
+
 # --- BSE Announcements Integration ---
 BSE_API_URL = "https://api.bseindia.com/BseIndiaAPI/api/AnnGetData/w"
 PDF_BASE_URL = "https://www.bseindia.com/xml-data/corpfiling/AttachLive/"
@@ -448,6 +588,9 @@ def ist_now():
     return datetime.now(IST_TZ)
 
 def db_seen_announcement_exists(user_client, user_id: str, news_id: str) -> bool:
+    """Check if announcement already recorded.
+    If the schema lacks user_id, fallback to global check by news_id only.
+    """
     try:
         resp = (
             user_client
@@ -459,27 +602,101 @@ def db_seen_announcement_exists(user_client, user_id: str, news_id: str) -> bool
         )
         return (getattr(resp, 'count', 0) or 0) > 0
     except Exception as e:
-        # If the table doesn't exist yet or any error occurs, do NOT block sending.
-        # We return False so announcements are treated as new.
+        msg = str(e).lower()
+        # Fallback when user_id column is missing: de-dup globally by news_id
+        if 'user_id' in msg and ('column' in msg or 'does not exist' in msg):
+            try:
+                resp2 = (
+                    user_client
+                    .table('seen_announcements')
+                    .select('news_id', count='exact')
+                    .eq('news_id', news_id)
+                    .execute()
+                )
+                return (getattr(resp2, 'count', 0) or 0) > 0
+            except Exception:
+                return False
+        # Otherwise do not block sending
         try:
             print(f"seen_announcements lookup failed, treating as new: {e}")
         except Exception:
             pass
         return False
 
-def db_save_seen_announcement(user_client, user_id: str, news_id: str, scrip_code: str, headline: str, pdf_name: str, ann_dt_iso: str, caption: str):
+from typing import Optional
+
+def db_save_seen_announcement(user_client, user_id: str, news_id: str, scrip_code: str, headline: str, pdf_name: str, ann_dt_iso: str, caption: str, category: Optional[str] = None):
+    payload = {
+        'user_id': user_id,
+        'news_id': news_id,
+        'scrip_code': scrip_code,
+        'headline': headline,
+        'pdf_name': pdf_name,
+        'ann_date': ann_dt_iso,
+        'caption': caption,
+    }
+    # Try insert with category first
+    if category is not None:
+        payload_with_cat = dict(payload)
+        payload_with_cat['category'] = category
+    else:
+        payload_with_cat = payload
     try:
-        user_client.table('seen_announcements').insert({
-            'user_id': user_id,
-            'news_id': news_id,
-            'scrip_code': scrip_code,
-            'headline': headline,
-            'pdf_name': pdf_name,
-            'ann_date': ann_dt_iso,
-            'caption': caption,
-        }).execute()
-    except Exception:
-        pass
+        user_client.table('seen_announcements').insert(payload_with_cat).execute()
+        return
+    except Exception as e:
+        msg = str(e).lower()
+        # Retry without category if the column doesn't exist
+        if 'category' in msg and ('column' in msg or 'does not exist' in msg):
+            try:
+                user_client.table('seen_announcements').insert(payload).execute()
+                return
+            except Exception:
+                pass
+        # Ignore duplicates and other transient errors silently
+        return
+
+ALLOWED_ANNOUNCEMENT_CATEGORIES = {
+    'financials',
+    'rating',
+    'investor_presentation',
+    'Board Meeting',
+    'Happening',
+}
+
+def classify_bse_headline(headline: str):
+    """Return one of the allowed categories or None if it should be ignored.
+    Heuristics based on keywords in the headline.
+    """
+    if not headline:
+        return None
+    h = headline.lower()
+
+    # Investor presentation
+    if "investor presentation" in h:
+        return 'investor_presentation'
+
+    # Financials (strict rule)
+    if "unaudited" in h and ("financial" in h or "result" in h or "results" in h):
+        return 'financials'
+
+    # Rating
+    if ("rating" in h) or ("credit" in h):
+        return 'rating'
+
+    # Board Meeting
+    if "board meeting" in h or "meeting of the board of directors" in h:
+        return 'Board Meeting'
+
+    # Happening (events like LOI, order, award)
+    if (
+        "letter of intent" in h or " loi " in h or h.startswith("loi ") or "(loi)" in h
+        or "award" in h or "awarded" in h or "award of" in h
+        or "order received" in h or "received order" in h or "purchase order" in h or "work order" in h or "contract" in h
+    ):
+        return 'Happening'
+
+    return None
 
 def fetch_bse_announcements_for_scrip(scrip_code: str, since_dt) -> list[dict]:
     import requests
@@ -492,8 +709,26 @@ def fetch_bse_announcements_for_scrip(scrip_code: str, since_dt) -> list[dict]:
             'strScrip': scrip_code, 'strSearch': 'P', 'strType': 'C'
         }
         r = requests.get(BSE_API_URL, headers=BSE_HEADERS, params=params, timeout=30)
+        if os.environ.get('BSE_VERBOSE', '0') == '1':
+            try:
+                print(f"BSE fetch {scrip_code}: HTTP {r.status_code} url={r.url}")
+            except Exception:
+                pass
         data = r.json() if r.status_code == 200 else {}
         table = data.get('Table') or []
+        if not table and os.environ.get('BSE_VERBOSE', '0') == '1':
+            print(f"BSE fetch {scrip_code}: empty table. Retrying with relaxed params...")
+        # Fallback: retry with no strSearch filter if empty
+        if not table:
+            params2 = {
+                'strCat': '-1', 'strPrevDate': from_date_str, 'strToDate': to_date_str,
+                'strScrip': scrip_code, 'strSearch': '', 'strType': 'C'
+            }
+            r2 = requests.get(BSE_API_URL, headers=BSE_HEADERS, params=params2, timeout=30)
+            data2 = r2.json() if r2.status_code == 200 else {}
+            table = data2.get('Table') or []
+            if os.environ.get('BSE_VERBOSE', '0') == '1':
+                print(f"BSE fetch fallback {scrip_code}: HTTP {r2.status_code} items={len(table)}")
         for ann in table:
             news_id = ann.get('NEWSID')
             pdf_name = ann.get('ATTACHMENTNAME')
@@ -504,18 +739,33 @@ def fetch_bse_announcements_for_scrip(scrip_code: str, since_dt) -> list[dict]:
                 continue
             # Parse announcement date (several formats observed)
             dt_parsed = None
-            for fmt in ('%d %b %Y %I:%M:%S %p', '%Y-%m-%d %I:%M %p', '%Y-%m-%dT%H:%M:%S.%f', '%Y-%m-%dT%H:%M:%S'):
+            formats = (
+                '%d %b %Y %I:%M:%S %p',  # e.g., 08 Nov 2024 05:25:00 PM
+                '%d %b %Y %I:%M %p',     # e.g., 08 Nov 2024 05:25 PM
+                '%d %b %Y %H:%M:%S',     # e.g., 08 Nov 2024 17:25:00
+                '%d %b %Y %H:%M',        # e.g., 08 Nov 2024 17:25
+                '%Y-%m-%d %H:%M:%S',     # e.g., 2024-11-08 17:25:00
+                '%Y-%m-%d %H:%M',        # e.g., 2024-11-08 17:25
+                '%Y-%m-%dT%H:%M:%S.%f',  # e.g., 2024-11-08T17:25:00.000
+                '%Y-%m-%dT%H:%M:%S',     # e.g., 2024-11-08T17:25:00
+            )
+            for fmt in formats:
                 try:
-                    dt_parsed = datetime.strptime(ann_date_str, fmt)
+                    dt_parsed = datetime.strptime(ann_date_str.strip(), fmt)
                     break
-                except ValueError:
-                    continue
-            if not dt_parsed:
-                # Try to strip potential timezone suffixes or extra parts
-                try:
-                    dt_parsed = datetime.fromisoformat(ann_date_str.split('.')[0])
                 except Exception:
                     continue
+            if not dt_parsed:
+                # Try dateutil as a robust fallback (day-first common in BSE)
+                try:
+                    from dateutil import parser as _dtparser  # provided via pandas dependency
+                    dt_parsed = _dtparser.parse(ann_date_str, dayfirst=True)
+                except Exception:
+                    # Try ISO split
+                    try:
+                        dt_parsed = datetime.fromisoformat(ann_date_str.split('.')[0])
+                    except Exception:
+                        continue
             # Localize to IST if naive
             if dt_parsed.tzinfo is None:
                 ann_dt = dt_parsed.replace(tzinfo=IST_TZ)
@@ -524,14 +774,20 @@ def fetch_bse_announcements_for_scrip(scrip_code: str, since_dt) -> list[dict]:
             if ann_dt < since_dt:
                 continue
             headline = ann.get('NEWSSUB') or ann.get('HEADLINE', 'N/A')
+            category = classify_bse_headline(headline)
+            if not category:
+                continue  # ignore announcements outside our categories
             results.append({
                 'news_id': news_id,
                 'scrip_code': scrip_code,
                 'headline': headline,
                 'pdf_name': pdf_name,
                 'ann_dt': ann_dt,
+                'category': category,
             })
-    except Exception:
+    except Exception as e:
+        if os.environ.get('BSE_VERBOSE', '0') == '1':
+            print(f"BSE fetch error {scrip_code}: {e}")
         pass
     return results
 
@@ -544,6 +800,7 @@ def send_bse_announcements_consolidated(user_client, user_id: str, monitored_scr
     except Exception:
         pass
     import requests
+    import pandas as pd
     messages_sent = 0
     since_dt = ist_now() - timedelta(hours=hours_back)
 
@@ -556,16 +813,16 @@ def send_bse_announcements_consolidated(user_client, user_id: str, monitored_scr
             if not db_seen_announcement_exists(user_client, user_id, item['news_id']):
                 all_new.append(item)
 
-    if not all_new:
-        # Optionally send a small notice
-        return 0
+    recipients_count = len(telegram_recipients)
+    ann_count = len(all_new)
+    if os.environ.get('BSE_VERBOSE', '0') == '1':
+        try:
+            print(f"BSE: user={user_id} new_items={ann_count} recipients={recipients_count}")
+        except Exception:
+            pass
 
-    # Build a consolidated message + attach PDFs individually
-    header = [
-        "📰 BSE Announcements",
-        f"🕐 {ist_now().strftime('%Y-%m-%d %H:%M:%S')} IST",
-        "",
-    ]
+    if not all_new:
+        return 0
 
     # Group items per scrip for nicer formatting
     from collections import defaultdict
@@ -573,11 +830,84 @@ def send_bse_announcements_consolidated(user_client, user_id: str, monitored_scr
     for item in sorted(all_new, key=lambda x: x['ann_dt'], reverse=True):
         by_scrip[item['scrip_code']].append(item)
 
-    # Create text summary
+    # Prepare price and % change per scrip using Yahoo fallback
+    symbol_map = {}
+    price_info = {}
+    try:
+        company_df = pd.read_csv('indian_stock_tickers.csv')
+        def get_symbol(bse_code):
+            try:
+                bse_code_int = int(bse_code)
+                row = company_df[company_df['BSE Code'] == bse_code_int]
+            except Exception:
+                row = company_df[company_df['BSE Code'].astype(str) == str(bse_code)]
+            if row.empty:
+                return None
+            sym = str(row.iloc[0].get('Yahoo Symbol', '')).strip()
+            return sym or None
+
+        # Compute for unique scrip codes in announcements
+        from math import isfinite
+        for scrip_code in set(str(k) for k in by_scrip.keys()):
+            sym = get_symbol(scrip_code)
+            if not sym:
+                continue
+            symbol_map[scrip_code] = sym
+            # current price
+            s_intraday = yahoo_chart_series_cached(sym, '1d', '1m')
+            price = None
+            if s_intraday is not None and not s_intraday.empty:
+                try:
+                    price = float(s_intraday.iloc[-1])
+                except Exception:
+                    price = None
+            # previous close
+            prev_close = None
+            s_daily = yahoo_chart_series_cached(sym, '5d', '1d')
+            if s_daily is not None and not s_daily.empty:
+                closes = s_daily.dropna()
+                if len(closes) >= 2:
+                    try:
+                        prev_close = float(closes.iloc[-2])
+                    except Exception:
+                        prev_close = None
+                elif len(closes) == 1:
+                    try:
+                        prev_close = float(closes.iloc[-1])
+                    except Exception:
+                        prev_close = None
+            pct = None
+            if price is not None and prev_close not in (None, 0):
+                try:
+                    pct = ((price - prev_close) / prev_close) * 100.0
+                except Exception:
+                    pct = None
+            price_info[scrip_code] = (price, prev_close, pct)
+    except Exception:
+        pass
+
+    # Build a consolidated message summary
+    header = [
+        "📰 BSE Announcements",
+        f"🕐 {ist_now().strftime('%Y-%m-%d %H:%M:%S')} IST",
+        "",
+    ]
     lines = header[:]
     for scrip_code, items in by_scrip.items():
         company_name = code_to_name.get(str(scrip_code)) or str(scrip_code)
-        lines.append(f"• {company_name}")
+        price, prev_close, pct = price_info.get(str(scrip_code), (None, None, None))
+        def fmt_price(val):
+            try:
+                return f"₹{float(val):.2f}"
+            except Exception:
+                return "N/A"
+        change_str = ""
+        if pct is not None:
+            arrow = "🔺" if pct >= 0 else "🔻"
+            sign = "+" if pct >= 0 else ""
+            change_str = f" {arrow} ({sign}{pct:.2f}%)"
+        price_line = f" — {fmt_price(price)}{change_str}" if price is not None else ""
+        lines.append(f"• {company_name}{price_line}")
         for it in items[:5]:
             lines.append(f"  - {it['ann_dt'].strftime('%d-%m %H:%M')} — {it['headline']}")
         lines.append("")
@@ -590,10 +920,32 @@ def send_bse_announcements_consolidated(user_client, user_id: str, monitored_scr
         post(f"{TELEGRAM_API_URL}/sendMessage", json={'chat_id': chat_id, 'text': summary_text, 'parse_mode': 'HTML'}, timeout=10)
         messages_sent += 1
 
-    # Send documents (PDFs)
+    # Send documents (PDFs) with price and % change in caption
     for item in all_new:
         friendly_name = code_to_name.get(str(item['scrip_code'])) or str(item['scrip_code'])
-        caption = f"Company: {friendly_name}\nAnnouncement: {item['headline']}\nDate: {item['ann_dt'].strftime('%d-%m-%Y %H:%M')} IST"
+        price, prev_close, pct = price_info.get(str(item['scrip_code']), (None, None, None))
+        def fmt_price(val):
+            try:
+                return f"₹{float(val):.2f}"
+            except Exception:
+                return "N/A"
+        pct_str = ""
+        if pct is not None:
+            arrow = "🔺" if pct >= 0 else "🔻"
+            sign = "+" if pct >= 0 else ""
+            pct_str = f" ({arrow} {sign}{pct:.2f}%)"
+        price_line = f"\nPrice: {fmt_price(price)}{pct_str}" if price is not None else ""
+        # Include category in caption for clarity
+        category_label = item.get('category') or ''
+        if category_label:
+            category_label = f"\nCategory: {category_label}"
+        caption = (
+            f"Company: {friendly_name}\n"
+            f"Announcement: {item['headline']}\n"
+            f"Date: {item['ann_dt'].strftime('%d-%m-%Y %H:%M')} IST"
+            f"{price_line}"
+            f"{category_label}"
+        )
         pdf_url = f"{PDF_BASE_URL}{item['pdf_name']}"
         try:
             resp = requests.get(pdf_url, headers=BSE_HEADERS, timeout=30)
@@ -603,15 +955,70 @@ def send_bse_announcements_consolidated(user_client, user_id: str, monitored_scr
                     data = {"chat_id": rec['chat_id'], "caption": caption, "parse_mode": "HTML"}
                     requests.post(f"{TELEGRAM_API_URL}/sendDocument", data=data, files=files, timeout=45)
                 # Record as seen for this user
-                db_save_seen_announcement(user_client, user_id, item['news_id'], item['scrip_code'], item['headline'], item['pdf_name'], item['ann_dt'].isoformat(), caption)
+                db_save_seen_announcement(user_client, user_id, item['news_id'], item['scrip_code'], item['headline'], item['pdf_name'], item['ann_dt'].isoformat(), caption, item.get('category'))
             else:
                 # Could not fetch PDF, still mark as seen to avoid repeated attempts
-                db_save_seen_announcement(user_client, user_id, item['news_id'], item['scrip_code'], item['headline'], item['pdf_name'], item['ann_dt'].isoformat(), caption)
+                db_save_seen_announcement(user_client, user_id, item['news_id'], item['scrip_code'], item['headline'], item['pdf_name'], item['ann_dt'].isoformat(), caption, item.get('category'))
         except Exception:
             # On errors, we still mark as seen to limit retries (could adjust behavior)
-            db_save_seen_announcement(user_client, user_id, item['news_id'], item['scrip_code'], item['headline'], item['pdf_name'], item['ann_dt'].isoformat(), caption)
+            db_save_seen_announcement(user_client, user_id, item['news_id'], item['scrip_code'], item['headline'], item['pdf_name'], item['ann_dt'].isoformat(), caption, item.get('category'))
+
+    # Final log line for Render logs
+    try:
+        total_documents = ann_count * recipients_count
+        print(f"BSE: user={user_id} summary_messages={recipients_count} documents_sent={total_documents} (items={ann_count} x recipients={recipients_count})")
+    except Exception:
+        pass
 
     return messages_sent
+def _get_price_change_and_volume(sym: str):
+    """Return tuple (price_change_pct, volume_spike_pct, price, prev_close, today_vol, prev_vol)
+    price_change_pct: percent change vs previous close
+    volume_spike_pct: today's volume as a percentage of previous day's volume (e.g., 400 means 4x)
+    """
+    try:
+        s_intraday = yahoo_chart_series_cached(sym, '1d', '1m')
+        price = float(s_intraday.dropna().iloc[-1]) if s_intraday is not None and not s_intraday.empty else None
+        # Daily OHLCV for last few days
+        s_daily = yahoo_chart_series_cached(sym, '10d', '1d')
+        prev_close = None
+        today_vol = None
+        prev_vol = None
+        price_change_pct = None
+        volume_spike_pct = None
+        if s_daily is not None and not s_daily.empty:
+            closes = s_daily.dropna()
+            # We don't have volume in this series; fetch via direct chart API
+            import requests
+            url = f"https://query1.finance.yahoo.com/v8/finance/chart/{sym}?range=10d&interval=1d"
+            r = requests.get(url, timeout=10)
+            vols = None
+            if r.status_code == 200:
+                data = r.json()
+                try:
+                    vols = data['chart']['result'][0]['indicators']['quote'][0]['volume']
+                except Exception:
+                    vols = None
+            if vols:
+                vols = [v for v in vols if v is not None]
+                if len(vols) >= 2:
+                    prev_vol = float(vols[-2])
+                    today_vol = float(vols[-1])
+                    if prev_vol and prev_vol > 0:
+                        volume_spike_pct = (today_vol / prev_vol) * 100.0
+            if len(closes) >= 2:
+                prev_close = float(closes.iloc[-2])
+                if price is None:
+                    try:
+                        price = float(closes.iloc[-1])
+                    except Exception:
+                        price = None
+                if price is not None and prev_close not in (None, 0):
+                    price_change_pct = ((price - prev_close) / prev_close) * 100.0
+        return price_change_pct, volume_spike_pct, price, prev_close, today_vol, prev_vol
+    except Exception:
+        return None, None, None, None, None, None
+
 def send_script_messages_to_telegram(user_client, user_id: str, monitored_scrips, telegram_recipients):
     """
     Sends a single consolidated Telegram message with current price and moving averages

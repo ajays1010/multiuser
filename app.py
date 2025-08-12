@@ -108,6 +108,7 @@ def login():
     return render_template('login_unified.html')
 
 @app.route('/cron/bse_announcements')
+@app.route('/cron/hourly_spike_alerts')
 def cron_bse_announcements():
     """Cron-compatible endpoint to send BSE announcements.
     Expects a secret key in query string (?key=...) to prevent abuse.
@@ -152,7 +153,7 @@ def cron_bse_announcements():
                 continue
             recs_by_user.setdefault(uid, []).append({'chat_id': r.get('chat_id')})
 
-        totals = {"users_processed": 0, "notifications_sent": 0, "users_skipped": 0}
+        totals = {"users_processed": 0, "notifications_sent": 0, "users_skipped": 0, "recipients": 0, "items": 0}
         errors = []
 
         for uid, scrips in scrips_by_user.items():
@@ -161,9 +162,15 @@ def cron_bse_announcements():
                 totals["users_skipped"] += 1
                 continue
             try:
-                sent = db.send_bse_announcements_consolidated(sb, uid, scrips, recipients, hours_back=hours_back)
+                # Decide which job to run based on path
+                if request.path.endswith('/hourly_spike_alerts'):
+                    sent = db.send_hourly_spike_alerts(sb, uid, scrips, recipients)
+                else:
+                    sent = db.send_bse_announcements_consolidated(sb, uid, scrips, recipients, hours_back=hours_back)
                 totals["users_processed"] += 1
                 totals["notifications_sent"] += sent
+                totals["recipients"] += len(recipients)
+                # We do not know exact items here, but we can log via BSE_VERBOSE in the function
             except Exception as e:
                 errors.append({"user_id": uid, "error": str(e)})
 

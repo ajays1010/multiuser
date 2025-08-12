@@ -1,9 +1,13 @@
 <!DOCTYPE html>
 <html>
-<head><title>Dashboard</title><script src="https://cdn.tailwindcss.com"></script></head>
+<head>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
 <body class="bg-gray-100">
     <div class="container mx-auto p-4 md:p-8">
-        <div class="flex justify-between items-center mb-6">
+        <div class="flex flex-col sm:flex-row justify-between sm:items-center gap-3 mb-6">
             <h1 class="text-3xl font-bold text-gray-800">Your Dashboard</h1>
             <div class="flex gap-3">
                 <a href="/sentiment_analysis" class="bg-blue-500 text-white py-2 px-4 rounded hover:bg-blue-600">📊 Sentiment Analysis</a>
@@ -24,11 +28,18 @@
         {% endif %}
         {% endwith %}
 
-        <div class="grid grid-cols-1 lg:grid-cols-2 gap-8">
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4 md:gap-8">
             <div class="bg-white p-6 rounded-lg shadow-lg">
                 <h2 class="text-xl font-semibold mb-4">Monitor New Scrip</h2>
                 <!-- This is the new search box that provides suggestions -->
                 <div class="relative mb-6">
+                    <!-- On small screens, make the search full-width and bump tap targets -->
+                    <style>
+                        @media (max-width: 640px) {
+                            #search-box { font-size: 16px; padding: 12px 14px; }
+                            #search-results div { padding: 12px 10px; }
+                        }
+                    </style>
                     <input type="text" id="search-box" placeholder="Search by name or BSE code..." class="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700" autocomplete="off">
                     <div id="search-results" class="absolute z-10 w-full bg-white border mt-1 rounded-lg shadow-lg hidden"></div>
                 </div>

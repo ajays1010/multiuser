@@ -69,23 +69,32 @@ def dashboard(sb):
 @admin_required
 def cron_runs(sb):
     """Admin-only page: view last cron run summaries (counts per user)."""
+    # Try a robust fetch that works even if ordering fails
+    error_msg = None
     try:
-        # Show the last 10 runs grouped by run_id, newest first
-        # We fetch recent rows and group in Python for simplicity
-        rows = sb.table('cron_run_logs').select('*').order('run_at', desc=True).limit(500).execute().data or []
-        # Group by run_id
+        q = sb.table('cron_run_logs').select('*')
+        try:
+            q = q.order('run_at', desc=True)
+        except Exception:
+            pass
+        rows = q.limit(500).execute().data or []
+    except Exception as e:
+        rows = []
+        error_msg = f"Query error: {e}"
+
+    try:
         from collections import defaultdict
         grouped = defaultdict(list)
         for r in rows:
             grouped[r.get('run_id')].append(r)
-        # Build a summary per run
         runs = []
         for run_id, items in grouped.items():
             if not items:
                 continue
-            items_sorted = sorted(items, key=lambda x: x.get('user_id') or '')
-            job = items[0].get('job')
-            run_at = items[0].get('run_at')
+            # Prefer the newest item's run_at/job
+            items_sorted = sorted(items, key=lambda x: (x.get('user_id') or ''))
+            job = (sorted(items, key=lambda x: str(x.get('run_at') or ''))[-1]).get('job')
+            run_at = (sorted(items, key=lambda x: str(x.get('run_at') or ''))[-1]).get('run_at')
             total_users = len({i.get('user_id') for i in items if i.get('user_id')})
             processed_users = sum(1 for i in items if i.get('processed'))
             skipped_users = sum(1 for i in items if not i.get('processed'))
@@ -100,14 +109,15 @@ def cron_runs(sb):
                 'skipped_users': skipped_users,
                 'total_notifications': total_notifications,
                 'total_recipients': total_recipients,
-                'items': items_sorted[:50],  # limit per-run details to 50 rows
+                'items': items_sorted[:50],
             })
-        # Limit to last 10 distinct runs by run_at
-        runs = sorted(runs, key=lambda x: x['run_at'], reverse=True)[:10]
+        runs = sorted(runs, key=lambda x: str(x.get('run_at') or ''), reverse=True)[:10]
+        if error_msg:
+            flash(error_msg, 'warning')
         return render_template('admin_cron_runs.html', runs=runs)
     except Exception as e:
-        flash(f"Error loading cron runs: {e}", 'error')
-        return redirect(url_for('admin.dashboard'))
+        flash(f"Error processing cron runs: {e}", 'error')
+        return render_template('admin_cron_runs.html', runs=[])
 
 @admin_bp.route('/user/<user_id>')
 @admin_required

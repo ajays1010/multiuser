@@ -167,6 +167,7 @@ def cron_bse_announcements():
                 totals["users_skipped"] += 1
                 try:
                     sb.table('cron_run_logs').insert({
+                        'id': str(uuid.uuid4()),
                         'run_id': run_id,
                         'job': job_name,
                         'user_id': uid,
@@ -188,6 +189,7 @@ def cron_bse_announcements():
                 totals["recipients"] += len(recipients)
                 try:
                     sb.table('cron_run_logs').insert({
+                        'id': str(uuid.uuid4()),
                         'run_id': run_id,
                         'job': job_name,
                         'user_id': uid,

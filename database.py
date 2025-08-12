@@ -900,7 +900,15 @@ def send_bse_announcements_consolidated(user_client, user_id: str, monitored_scr
                     price = float(s_intraday.iloc[-1])
                 except Exception:
                     price = None
-            # previous close
+            else:
+                # Try a slightly coarser intraday interval before giving up
+                s_5m = yahoo_chart_series_cached(sym, '1d', '5m')
+                if s_5m is not None and not s_5m.empty:
+                    try:
+                        price = float(s_5m.iloc[-1])
+                    except Exception:
+                        price = None
+            # previous close (from daily series)
             prev_close = None
             s_daily = yahoo_chart_series_cached(sym, '5d', '1d')
             if s_daily is not None and not s_daily.empty:
@@ -908,11 +916,6 @@ def send_bse_announcements_consolidated(user_client, user_id: str, monitored_scr
                 if len(closes) >= 2:
                     try:
                         prev_close = float(closes.iloc[-2])
-                    except Exception:
-                        prev_close = None
-                elif len(closes) == 1:
-                    try:
-                        prev_close = float(closes.iloc[-1])
                     except Exception:
                         prev_close = None
             pct = None
@@ -942,8 +945,8 @@ def send_bse_announcements_consolidated(user_client, user_id: str, monitored_scr
                 return "N/A"
         change_str = ""
         if pct is not None:
-            arrow = "🔺" if pct >= 0 else "🔻"
-            sign = "+" if pct >= 0 else ""
+            arrow = "🔺" if pct > 0 else ("🔻" if pct < 0 else "➖")
+            sign = "+" if pct > 0 else ("" if pct == 0 else "")
             change_str = f" {arrow} ({sign}{pct:.2f}%)"
         price_line = f" — {fmt_price(price)}{change_str}" if price is not None else ""
         lines.append(f"• {company_name}{price_line}")
@@ -970,8 +973,8 @@ def send_bse_announcements_consolidated(user_client, user_id: str, monitored_scr
                 return "N/A"
         pct_str = ""
         if pct is not None:
-            arrow = "🔺" if pct >= 0 else "🔻"
-            sign = "+" if pct >= 0 else ""
+            arrow = "🔺" if pct > 0 else ("🔻" if pct < 0 else "➖")
+            sign = "+" if pct > 0 else ("" if pct == 0 else "")
             pct_str = f" ({arrow} {sign}{pct:.2f}%)"
         price_line = f"\nPrice: {fmt_price(price)}{pct_str}" if price is not None else ""
         # Include category in caption for clarity

@@ -9,6 +9,7 @@ import pandas as pd
 import database as db
 from firebase_admin import auth
 from admin import admin_bp
+import uuid
 from sentiment_analyzer import get_sentiment_analysis_for_stock, create_sentiment_visualizations
 
 app = Flask(__name__)
@@ -156,10 +157,25 @@ def cron_bse_announcements():
         totals = {"users_processed": 0, "notifications_sent": 0, "users_skipped": 0, "recipients": 0, "items": 0}
         errors = []
 
+        import uuid
+        run_id = str(uuid.uuid4())
+        job_name = 'hourly_spike_alerts' if request.path.endswith('/hourly_spike_alerts') else 'bse_announcements'
+
         for uid, scrips in scrips_by_user.items():
             recipients = recs_by_user.get(uid) or []
             if not scrips or not recipients:
                 totals["users_skipped"] += 1
+                try:
+                    sb.table('cron_run_logs').insert({
+                        'run_id': run_id,
+                        'job': job_name,
+                        'user_id': uid,
+                        'processed': False,
+                        'notifications_sent': 0,
+                        'recipients': int(len(recipients)),
+                    }).execute()
+                except Exception:
+                    pass
                 continue
             try:
                 # Decide which job to run based on path
@@ -170,6 +186,17 @@ def cron_bse_announcements():
                 totals["users_processed"] += 1
                 totals["notifications_sent"] += sent
                 totals["recipients"] += len(recipients)
+                try:
+                    sb.table('cron_run_logs').insert({
+                        'run_id': run_id,
+                        'job': job_name,
+                        'user_id': uid,
+                        'processed': True,
+                        'notifications_sent': int(sent),
+                        'recipients': int(len(recipients)),
+                    }).execute()
+                except Exception:
+                    pass
                 # We do not know exact items here, but we can log via BSE_VERBOSE in the function
             except Exception as e:
                 errors.append({"user_id": uid, "error": str(e)})

@@ -1,4 +1,4 @@
-from flask import Blueprint, render_template, request, redirect, url_for, session, flash
+from flask import Blueprint, render_template, request, redirect, url_for, session, flash, jsonify
 from functools import wraps
 import database as db
 
@@ -64,6 +64,50 @@ def dashboard(sb):
     """Main admin dashboard. Shows a list of all users."""
     all_users = db.admin_get_all_users()
     return render_template('admin_dashboard.html', users=all_users, selected_user=None)
+
+@admin_bp.route('/cron_runs')
+@admin_required
+def cron_runs(sb):
+    """Admin-only page: view last cron run summaries (counts per user)."""
+    try:
+        # Show the last 10 runs grouped by run_id, newest first
+        # We fetch recent rows and group in Python for simplicity
+        rows = sb.table('cron_run_logs').select('*').order('run_at', desc=True).limit(500).execute().data or []
+        # Group by run_id
+        from collections import defaultdict
+        grouped = defaultdict(list)
+        for r in rows:
+            grouped[r.get('run_id')].append(r)
+        # Build a summary per run
+        runs = []
+        for run_id, items in grouped.items():
+            if not items:
+                continue
+            items_sorted = sorted(items, key=lambda x: x.get('user_id') or '')
+            job = items[0].get('job')
+            run_at = items[0].get('run_at')
+            total_users = len({i.get('user_id') for i in items if i.get('user_id')})
+            processed_users = sum(1 for i in items if i.get('processed'))
+            skipped_users = sum(1 for i in items if not i.get('processed'))
+            total_notifications = sum(int(i.get('notifications_sent') or 0) for i in items)
+            total_recipients = sum(int(i.get('recipients') or 0) for i in items)
+            runs.append({
+                'run_id': run_id,
+                'run_at': run_at,
+                'job': job,
+                'total_users': total_users,
+                'processed_users': processed_users,
+                'skipped_users': skipped_users,
+                'total_notifications': total_notifications,
+                'total_recipients': total_recipients,
+                'items': items_sorted[:50],  # limit per-run details to 50 rows
+            })
+        # Limit to last 10 distinct runs by run_at
+        runs = sorted(runs, key=lambda x: x['run_at'], reverse=True)[:10]
+        return render_template('admin_cron_runs.html', runs=runs)
+    except Exception as e:
+        flash(f"Error loading cron runs: {e}", 'error')
+        return redirect(url_for('admin.dashboard'))
 
 @admin_bp.route('/user/<user_id>')
 @admin_required

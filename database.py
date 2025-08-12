@@ -973,7 +973,7 @@ def send_bse_announcements_consolidated(user_client, user_id: str, monitored_scr
                 return "N/A"
         pct_str = ""
         if pct is not None:
-            arrow = "🔺" if pct > 0 else ("🔻" if pct < 0 else "➖")
+            arrow = "💹" if pct > 0 else ("🔻" if pct < 0 else "➖")
             sign = "+" if pct > 0 else ("" if pct == 0 else "")
             pct_str = f" ({arrow} {sign}{pct:.2f}%)"
         price_line = f"\nPrice: {fmt_price(price)}{pct_str}" if price is not None else ""
@@ -1210,3 +1210,4 @@ def send_script_messages_to_telegram(user_client, user_id: str, monitored_scrips
     except Exception as e:
         print(f"Error in send_script_messages_to_telegram: {e}")
         raise e
+

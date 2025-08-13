@@ -8,12 +8,25 @@
 <body class="bg-gray-100">
     <div class="container mx-auto p-4 md:p-8">
         <div class="flex justify-between items-center mb-6">
-            <h1 class="text-3xl font-bold text-gray-800">Cron Run Summaries</h1>
             <div>
+                <h1 class="text-3xl font-bold text-gray-800">Cron Run Summaries</h1>
+                <p class="text-sm text-gray-600">Evening summary time (IST): {{ evening_time or '16:00' }}</p>
+            </div>
+            <div>
+            
                 <a href="/admin" class="text-blue-500 mr-4">Back to Admin Dashboard</a>
                 <a href="/logout" class="bg-gray-500 text-white py-2 px-4 rounded hover:bg-gray-600">Logout</a>
             </div>
         </div>
+
+        <form action="/admin/set_evening_time" method="post" class="bg-white p-4 rounded-lg shadow mb-6">
+            <label class="text-sm text-gray-700">Update evening summary time (IST HH:MM):</label>
+            <div class="flex items-center gap-2 mt-2">
+                <input type="text" name="evening_time" placeholder="16:00" class="border rounded p-2" />
+                <button class="bg-blue-600 hover:bg-blue-700 text-white px-3 py-2 rounded" type="submit">Save</button>
+            </div>
+            <p class="text-xs text-gray-500 mt-1">Note: Set your Render Cron to call /cron/evening_summary at the chosen time with your CRON_SECRET_KEY.</p>
+        </form>
 
         {% with messages = get_flashed_messages(with_categories=True) %}
         {% if messages %}

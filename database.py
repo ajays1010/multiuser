@@ -583,30 +583,31 @@ def delete_user_scrip(user_client, user_id: str, bse_code: str):
 
 def add_user_recipient(user_client, user_id: str, chat_id: str):
     """
-    Add or assign a Telegram chat_id to the current user.
-    Handles the case where chat_id is globally unique and may already exist for another user.
+    Allow the same chat_id to be associated with multiple users.
     Behavior:
-    - If chat_id already exists for this user: no-op
-    - If chat_id exists for a different user: reassign to this user
-    - If chat_id doesn't exist: insert
+    - If (user_id, chat_id) already exists: no-op
+    - Otherwise, insert a new row mapping this user to this chat_id
     """
-    # Normalize chat_id to string for consistency
     chat_id_str = str(chat_id).strip()
-
-    # Look for existing record by chat_id (unique)
-    existing = user_client.table('telegram_recipients').select('user_id').eq('chat_id', chat_id_str).limit(1).execute()
-    existing_row = (existing.data or [None])[0]
-
-    if existing_row:
-        if str(existing_row.get('user_id')) == str(user_id):
-            # Already assigned to this user; nothing to do
+    try:
+        # Check exact pair exists
+        existing = (
+            user_client.table('telegram_recipients')
+            .select('user_id')
+            .eq('user_id', user_id)
+            .eq('chat_id', chat_id_str)
+            .limit(1)
+            .execute()
+        )
+        if existing.data:
             return
-        # Reassign this chat_id to the current user
-        user_client.table('telegram_recipients').update({'user_id': user_id}).eq('chat_id', chat_id_str).execute()
-        return
-
-    # Not found; insert new
-    user_client.table('telegram_recipients').insert({'user_id': user_id, 'chat_id': chat_id_str}).execute()
+        user_client.table('telegram_recipients').insert({'user_id': user_id, 'chat_id': chat_id_str}).execute()
+    except Exception:
+        # Best-effort insert
+        try:
+            user_client.table('telegram_recipients').insert({'user_id': user_id, 'chat_id': chat_id_str}).execute()
+        except Exception:
+            pass
 
 def delete_user_recipient(user_client, user_id: str, chat_id: str):
     user_client.table('telegram_recipients').delete().eq('user_id', user_id).eq('chat_id', chat_id).execute()
@@ -625,7 +626,7 @@ def admin_get_user_details(user_id: str):
     recipients = sb_admin.table('telegram_recipients').select('chat_id').eq('user_id', user_id).execute().data or []
     return {
         'id': profile['id'],
-        'email': profile.get('email', ''),
+        'email': profile.get('email', '') or '',
         'scrips': scrips,
         'recipients': recipients,
     }
@@ -641,12 +642,9 @@ def admin_delete_scrip_for_user(user_id: str, bse_code: str):
 def admin_add_recipient_for_user(user_id: str, chat_id: str):
     sb_admin = get_supabase_client(service_role=True)
     chat_id_str = str(chat_id).strip()
-    existing = sb_admin.table('telegram_recipients').select('user_id').eq('chat_id', chat_id_str).limit(1).execute()
-    existing_row = (existing.data or [None])[0]
-    if existing_row:
-        if str(existing_row.get('user_id')) == str(user_id):
-            return
-        sb_admin.table('telegram_recipients').update({'user_id': user_id}).eq('chat_id', chat_id_str).execute()
+    # Allow duplicates (user_id, chat_id) combinations
+    existing = sb_admin.table('telegram_recipients').select('user_id').eq('user_id', user_id).eq('chat_id', chat_id_str).limit(1).execute()
+    if existing.data:
         return
     sb_admin.table('telegram_recipients').insert({'user_id': user_id, 'chat_id': chat_id_str}).execute()
 

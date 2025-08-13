@@ -105,6 +105,212 @@ _YAHOO_SESSION = None
 _YAHOO_CACHE_SERIES = {}
 _YAHOO_CACHE_TTL = int(os.environ.get("YAHOO_CACHE_TTL", "60"))
 
+# ---- Price helpers (CMP vs previous close with robust fallbacks) ----
+import re as _re
+from bs4 import BeautifulSoup as _BS
+import requests as _requests
+import yfinance as _yf
+
+def _yahoo_symbol_to_bse_code(sym: str):
+    try:
+        base = sym.split('.')[0]
+        if base.isdigit():
+            return base
+    except Exception:
+        pass
+    return None
+
+def _fetch_chart_meta(sym: str):
+    try:
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{sym}?range=1d&interval=1m"
+        r = _requests.get(url, timeout=10)
+        if r.status_code != 200:
+            return None
+        data = r.json()
+        result = (data or {}).get('chart', {}).get('result')
+        if not result:
+            return None
+        meta = result[0].get('meta') or {}
+        return meta
+    except Exception:
+        return None
+
+def _fetch_quote_price(sym: str):
+    try:
+        url = f"https://query1.finance.yahoo.com/v7/finance/quote?symbols={sym}"
+        r = _requests.get(url, timeout=10)
+        if r.status_code != 200:
+            return None
+        data = r.json()
+        result = (data or {}).get('quoteResponse', {}).get('result') or []
+        if not result:
+            return None
+        row = result[0]
+        for key in ('regularMarketPrice', 'postMarketPrice', 'preMarketPrice'):
+            if row.get(key) is not None:
+                try:
+                    return float(row[key])
+                except Exception:
+                    pass
+        return None
+    except Exception:
+        return None
+
+def _scrape_screener_cmp(sym: str):
+    bse_code = _yahoo_symbol_to_bse_code(sym)
+    if not bse_code:
+        return None
+    url = f"https://www.screener.in/company/{bse_code}/"
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
+        'Referer': 'https://www.screener.in/'
+    }
+    try:
+        r = _requests.get(url, headers=headers, timeout=12)
+        if r.status_code != 200:
+            return None
+        html = r.text
+        m = _re.search(r'Current\s*Price[^0-9]*([0-9]+(?:,[0-9]{2,3})*(?:\.[0-9]+)?)', html, _re.I | _re.S)
+        if not m:
+            m = _re.search(r'\bCMP\b[^0-9]*([0-9]+(?:,[0-9]{2,3})*(?:\.[0-9]+)?)', html, _re.I | _re.S)
+        if m:
+            txt = m.group(1).replace(',', '')
+            try:
+                return float(txt)
+            except Exception:
+                pass
+        soup = _BS(html, 'lxml')
+        numbers = []
+        for span in soup.select('span.number, span.value'):
+            t = (span.get_text() or '').strip().replace(',', '')
+            if _re.fullmatch(r'[0-9]+(?:\.[0-9]+)?', t):
+                try:
+                    numbers.append(float(t))
+                except Exception:
+                    pass
+        if numbers:
+            numbers.sort()
+            return numbers[len(numbers)//2]
+        return None
+    except Exception:
+        return None
+
+def _last_today_value(series):
+    if series is None or series.empty:
+        return None
+    try:
+        idx = series.index
+        idx_ist = idx.tz_localize('UTC').tz_convert(IST_TZ) if getattr(idx, 'tz', None) is None else idx.tz_convert(IST_TZ)
+        s2 = series.copy()
+        s2.index = idx_ist
+        s2 = s2.dropna()
+        now = ist_now()
+        s2 = s2[s2.index.date == now.date()]
+        s2 = s2[s2.index <= now]
+        if not s2.empty:
+            return float(s2.iloc[-1])
+        return None
+    except Exception:
+        return None
+
+def _latest_cmp(sym: str):
+    # Try intraday up to 30m for today only
+    for rng, iv in [('1d','1m'),('1d','5m'),('1d','15m'),('1d','30m')]:
+        s = yahoo_chart_series_cached(sym, rng, iv)
+        val = _last_today_value(s)
+        if val is not None:
+            return val, f"chart_{rng}_{iv}"
+    # Meta/quote
+    meta = _fetch_chart_meta(sym)
+    if meta and meta.get('regularMarketPrice') is not None:
+        try:
+            return float(meta['regularMarketPrice']), 'meta_rmp'
+        except Exception:
+            pass
+    qp = _fetch_quote_price(sym)
+    if qp is not None:
+        return qp, 'quote_v7'
+    # yfinance
+    try:
+        t = _yf.Ticker(sym)
+        fi = getattr(t, 'fast_info', None)
+        if fi and fi.get('last_price') is not None:
+            return float(fi['last_price']), 'yf_fast_info'
+        for iv, label in [('1m','yf_hist_1m'),('5m','yf_hist_5m'),('15m','yf_hist_15m'),('30m','yf_hist_30m')]:
+            hist = t.history(period='1d', interval=iv)
+            if hist is not None and not hist.empty:
+                close = hist.get('Close')
+                if close is not None:
+                    close = close.dropna()
+                    if len(close) > 0:
+                        return float(close.iloc[-1]), label
+    except Exception:
+        pass
+    return None, None
+
+def _daily_closes(sym: str):
+    s_daily = yahoo_chart_series_cached(sym, '10d', '1d')
+    closes = s_daily.dropna() if (s_daily is not None and not s_daily.empty) else None
+    last_close = float(closes.iloc[-1]) if (closes is not None and len(closes) >= 1) else None
+    prev_close = float(closes.iloc[-2]) if (closes is not None and len(closes) >= 2) else None
+    prev_prev_close = float(closes.iloc[-3]) if (closes is not None and len(closes) >= 3) else None
+    return last_close, prev_close, prev_prev_close
+
+def get_cmp_and_prev(sym: str):
+    """Return (cmp, prev_close, source_label) based on IST time rules.
+    - Before 09:00 IST: cmp = last_close; prev = prev_close (fallback prev_prev)
+    - 09:00-15:30 IST: cmp = intraday/latest/meta/quote/yf/screener; prev = last_close
+    - After 15:30 IST: cmp = last_close; prev = prev_close
+    """
+    last_close, prev_close, prev_prev_close = _daily_closes(sym)
+    is_open, open_dt, close_dt = ist_market_window()
+    now = ist_now()
+    if now < open_dt:
+        cmp_price = last_close
+        prev = prev_close if prev_close is not None else prev_prev_close
+        return cmp_price, prev, 'preopen_last_close'
+    elif is_open:
+        cmp_price, src = _latest_cmp(sym)
+        if cmp_price is None:
+            cmp_price = _scrape_screener_cmp(sym)
+            src = src or ('screener' if cmp_price is not None else 'no_intraday')
+        return cmp_price, last_close, src
+    else:
+        return last_close, prev_close, 'postclose_last_close'
+
+def get_close_3m_ago(sym: str):
+    """Return close price around 3 months ago (nearest working day within ±3 days).
+    Uses 6 months of daily data.
+    """
+    try:
+        import pandas as pd
+        from datetime import timedelta
+        target = ist_now().date() - timedelta(days=90)
+        s = yahoo_chart_series_cached(sym, '6mo', '1d')
+        if s is None or s.empty:
+            return None
+        # Convert index to IST date
+        idx = s.index
+        idx_ist = idx.tz_localize('UTC').tz_convert(IST_TZ) if getattr(idx, 'tz', None) is None else idx.tz_convert(IST_TZ)
+        s2 = s.copy()
+        s2.index = idx_ist
+        s2 = s2.dropna()
+        if s2.empty:
+            return None
+        # Find nearest date
+        dates = pd.Series(s2.index.date, index=s2.index)
+        # Compute absolute day diff
+        diffs = dates.apply(lambda d: abs((d - target).days))
+        # Filter within ±3 days
+        within = diffs[diffs <= 3]
+        if within.empty:
+            return None
+        # Pick the smallest diff; get corresponding value
+        nearest_index = within.sort_values().index[0]
+        return float(s2.loc[nearest_index])
+    except Exception:
+        return None
+
 # Lazy-loaded company dataframe for symbol lookups
 _COMPANY_DF = None
 
@@ -540,14 +746,18 @@ def _record_alert_today(user_client, user_id: str, bse_code: str, alert_type: st
         pass
 
 def send_hourly_spike_alerts(user_client, user_id: str, monitored_scrips, telegram_recipients, price_threshold_pct: float = 5.0, volume_threshold_pct: float = 400.0) -> int:
-    """Scan each monitored scrip hourly and send at most one alert per day when:
-    - price change >= |5%| vs previous close, OR
-    - today's volume >= 400% of previous day's volume.
+    """Scan each monitored scrip hourly and send at most one alert per day during market hours when:
+    - abs(price change) >= threshold vs previous close, OR
+    - today's volume >= volume_threshold_pct of previous day's volume.
     Returns number of messages sent.
     Requires a table 'daily_alerts_sent' with schema in ALERTS_SQL_SCHEMA.
     """
     messages_sent = 0
     if not monitored_scrips or not telegram_recipients:
+        return 0
+    # Only send during market hours
+    is_open, _, _ = ist_market_window()
+    if not is_open:
         return 0
 
     # Pre-resolve symbols once
@@ -585,7 +795,7 @@ def send_hourly_spike_alerts(user_client, user_id: str, monitored_scrips, telegr
                 return f"{float(v):.2f}"
             except Exception:
                 return "N/A"
-        arrow = '🔺' if (price_change_pct or 0) >= 0 else '🔻'
+        arrow = '🔼' if (price_change_pct or 0) > 0 else ('🔻' if (price_change_pct or 0) < 0 else '➖')
         sign = '+' if (price_change_pct or 0) >= 0 else ''
         parts = [
             f"⚠️ Alert: {company_name} ({bse_code})",
@@ -617,6 +827,19 @@ BSE_HEADERS = {
 
 IST_OFFSET = timedelta(hours=5, minutes=30)
 IST_TZ = timezone(IST_OFFSET, name="IST")
+
+def ist_now():
+    return datetime.now(IST_TZ)
+
+def ist_market_window(now=None):
+    """Return tuple (is_market_hours, open_dt, close_dt) in IST.
+    Market hours: 09:00 to 15:30 inclusive.
+    """
+    if now is None:
+        now = ist_now()
+    open_dt = now.replace(hour=9, minute=0, second=0, microsecond=0)
+    close_dt = now.replace(hour=15, minute=30, second=0, microsecond=0)
+    return (open_dt <= now <= close_dt), open_dt, close_dt
 
 def ist_now():
     # Return timezone-aware IST datetime
@@ -892,32 +1115,8 @@ def send_bse_announcements_consolidated(user_client, user_id: str, monitored_scr
             if not sym:
                 continue
             symbol_map[scrip_code] = sym
-            # current price
-            s_intraday = yahoo_chart_series_cached(sym, '1d', '1m')
-            price = None
-            if s_intraday is not None and not s_intraday.empty:
-                try:
-                    price = float(s_intraday.iloc[-1])
-                except Exception:
-                    price = None
-            else:
-                # Try a slightly coarser intraday interval before giving up
-                s_5m = yahoo_chart_series_cached(sym, '1d', '5m')
-                if s_5m is not None and not s_5m.empty:
-                    try:
-                        price = float(s_5m.iloc[-1])
-                    except Exception:
-                        price = None
-            # previous close (from daily series)
-            prev_close = None
-            s_daily = yahoo_chart_series_cached(sym, '5d', '1d')
-            if s_daily is not None and not s_daily.empty:
-                closes = s_daily.dropna()
-                if len(closes) >= 2:
-                    try:
-                        prev_close = float(closes.iloc[-2])
-                    except Exception:
-                        prev_close = None
+            # Use robust CMP vs previous close logic
+            price, prev_close, _src = get_cmp_and_prev(sym)
             pct = None
             if price is not None and prev_close not in (None, 0):
                 try:
@@ -945,7 +1144,7 @@ def send_bse_announcements_consolidated(user_client, user_id: str, monitored_scr
                 return "N/A"
         change_str = ""
         if pct is not None:
-            arrow = "🔺" if pct > 0 else ("🔻" if pct < 0 else "➖")
+            arrow = "🔼" if pct > 0 else ("🔻" if pct < 0 else "➖")
             sign = "+" if pct > 0 else ("" if pct == 0 else "")
             change_str = f" {arrow} ({sign}{pct:.2f}%)"
         price_line = f" — {fmt_price(price)}{change_str}" if price is not None else ""
@@ -973,7 +1172,7 @@ def send_bse_announcements_consolidated(user_client, user_id: str, monitored_scr
                 return "N/A"
         pct_str = ""
         if pct is not None:
-            arrow = "🔺" if pct > 0 else ("🔻" if pct < 0 else "➖")
+            arrow = "🔼" if pct > 0 else ("🔻" if pct < 0 else "➖")
             sign = "+" if pct > 0 else ("" if pct == 0 else "")
             pct_str = f" ({arrow} {sign}{pct:.2f}%)"
         price_line = f"\nPrice: {fmt_price(price)}{pct_str}" if price is not None else ""
@@ -1210,5 +1409,3 @@ def send_script_messages_to_telegram(user_client, user_id: str, monitored_scrips
     except Exception as e:
         print(f"Error in send_script_messages_to_telegram: {e}")
         raise e
-
-

@@ -110,6 +110,7 @@ def login():
 
 @app.route('/cron/bse_announcements')
 @app.route('/cron/hourly_spike_alerts')
+@app.route('/cron/evening_summary')
 def cron_bse_announcements():
     """Cron-compatible endpoint to send BSE announcements.
     Expects a secret key in query string (?key=...) to prevent abuse.
@@ -182,6 +183,17 @@ def cron_bse_announcements():
                 # Decide which job to run based on path
                 if request.path.endswith('/hourly_spike_alerts'):
                     sent = db.send_hourly_spike_alerts(sb, uid, scrips, recipients)
+                elif request.path.endswith('/evening_summary'):
+                    # Enforce evening run by default; allow override with force=true
+                    force = request.args.get('force') == 'true'
+                    is_open, open_dt, close_dt = db.ist_market_window()
+                    from datetime import datetime
+                    now = db.ist_now()
+                    if (now <= close_dt) and not force:
+                        # Skip if before or during market hours unless forced
+                        sent = 0
+                    else:
+                        sent = db.send_bse_announcements_consolidated(sb, uid, scrips, recipients, hours_back=24)
                 else:
                     sent = db.send_bse_announcements_consolidated(sb, uid, scrips, recipients, hours_back=hours_back)
                 totals["users_processed"] += 1

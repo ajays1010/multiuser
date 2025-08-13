@@ -114,10 +114,32 @@ def cron_runs(sb):
         runs = sorted(runs, key=lambda x: str(x.get('run_at') or ''), reverse=True)[:10]
         if error_msg:
             flash(error_msg, 'warning')
-        return render_template('admin_cron_runs.html', runs=runs)
+        # Fetch current evening summary time from app_settings
+        setting = None
+        try:
+            setting = sb.table('app_settings').select('value').eq('key','evening_summary_ist_hhmm').single().execute().data
+        except Exception:
+            setting = None
+        evening_time = (setting or {}).get('value') if isinstance(setting, dict) else None
+        return render_template('admin_cron_runs.html', runs=runs, evening_time=evening_time)
     except Exception as e:
         flash(f"Error processing cron runs: {e}", 'error')
         return render_template('admin_cron_runs.html', runs=[])
+
+@admin_bp.route('/set_evening_time', methods=['POST'])
+@admin_required
+def set_evening_time(sb):
+    t = request.form.get('evening_time', '').strip()
+    import re
+    if not re.fullmatch(r'^[0-2]\d:[0-5]\d$', t):
+        flash('Invalid time format. Use HH:MM (24h).', 'error')
+        return redirect(url_for('admin.cron_runs'))
+    try:
+        sb.table('app_settings').upsert({'key':'evening_summary_ist_hhmm','value':t}).execute()
+        flash('Evening summary time updated.', 'success')
+    except Exception as e:
+        flash(f'Failed to update: {e}', 'error')
+    return redirect(url_for('admin.cron_runs'))
 
 @admin_bp.route('/user/<user_id>')
 @admin_required

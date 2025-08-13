@@ -1180,12 +1180,19 @@ def send_bse_announcements_consolidated(user_client, user_id: str, monitored_scr
         category_label = item.get('category') or ''
         if category_label:
             category_label = f"\nCategory: {category_label}"
+        # 3M-ago price for financials
+        extra_3m = ""
+        if item.get('category') == 'financials' and sym:
+            p3 = get_close_3m_ago(sym)
+            if p3 is not None:
+                extra_3m = f"\n3M ago: ₹{p3:,.2f}"
         caption = (
             f"Company: {friendly_name}\n"
             f"Announcement: {item['headline']}\n"
             f"Date: {item['ann_dt'].strftime('%d-%m-%Y %H:%M')} IST"
             f"{price_line}"
             f"{category_label}"
+            f"{extra_3m}"
         )
         pdf_url = f"{PDF_BASE_URL}{item['pdf_name']}"
         try:
@@ -1364,8 +1371,9 @@ def send_script_messages_to_telegram(user_client, user_id: str, monitored_scrips
             bse_code = meta['bse_code']
             company_name = meta['company_name']
 
-            # Current price from chart cache
-            current_price = prices.get(symbol, 'N/A')
+            # Current price with robust logic
+            cmp_price, prev_close, _src = get_cmp_and_prev(symbol)
+            current_price = cmp_price if cmp_price is not None else 'N/A'
 
             # Moving averages from daily history via chart API (cached)
             ma_50 = 'N/A'
@@ -1383,7 +1391,17 @@ def send_script_messages_to_telegram(user_client, user_id: str, monitored_scrips
 
             # Append section for this symbol
             lines.append(f"• {company_name} ({bse_code})")
-            lines.append(f"  - Price: {safe_fmt(current_price)}")
+            # Color indicator logic
+            indicator = '🟢'
+            try:
+                if ma_200 != 'N/A' and current_price != 'N/A' and float(current_price) < float(ma_200):
+                    indicator = '🔴'
+                elif ma_50 != 'N/A' and current_price != 'N/A' and float(current_price) < float(ma_50):
+                    indicator = '🟠'
+            except Exception:
+                pass
+
+            lines.append(f"  - Price: {safe_fmt(current_price)} {indicator}")
             lines.append(f"  - MA50: {safe_fmt(ma_50)} | MA200: {safe_fmt(ma_200)}")
             lines.append("")
 

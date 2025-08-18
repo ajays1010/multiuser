@@ -11,10 +11,46 @@ from firebase_admin import auth
 from admin import admin_bp
 import uuid
 from sentiment_analyzer import get_sentiment_analysis_for_stock, create_sentiment_visualizations
+from logging_config import github_logger
+import logging
+import traceback
+import atexit
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", "a-super-secret-key-for-local-testing")
 app.register_blueprint(admin_bp)
+
+# Initialize logging
+github_logger.log_app_start()
+
+# Error handling decorator
+def log_errors(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        try:
+            return f(*args, **kwargs)
+        except Exception as e:
+            github_logger.log_error(e, f"Route: {request.endpoint}")
+            raise
+    return decorated_function
+
+# Global error handlers
+@app.errorhandler(500)
+def internal_error(error):
+    github_logger.log_error(error, "Internal Server Error")
+    return {'error': 'Internal server error', 'timestamp': str(error)}, 500
+
+@app.errorhandler(Exception)
+def handle_exception(e):
+    github_logger.log_error(e, "Unhandled Exception")
+    return {'error': 'Application error', 'details': str(e)}, 500
+
+# Log memory usage periodically and push logs to GitHub
+def cleanup_and_log():
+    github_logger.log_memory_usage()
+    github_logger.push_logs_to_github()
+
+atexit.register(cleanup_and_log)
 
 # Ensure Firebase Admin SDK is initialized when the app starts (works under Gunicorn too)
 db.initialize_firebase()
@@ -111,6 +147,7 @@ def login():
 @app.route('/cron/bse_announcements')
 @app.route('/cron/hourly_spike_alerts')
 @app.route('/cron/evening_summary')
+@log_errors
 def cron_bse_announcements():
     """Cron-compatible endpoint to send BSE announcements.
     Expects a secret key in query string (?key=...) to prevent abuse.
@@ -236,6 +273,42 @@ def logout():
     return redirect(url_for('login'))
 
 # --- Main Application Routes (Protected) ---
+@app.route('/health')
+def health_check():
+    """Lightweight health check endpoint for uptime monitoring.
+    Returns 200 OK with minimal processing to keep the app alive.
+    """
+    from datetime import datetime
+    try:
+        # Quick DB connectivity check
+        sb = db.get_supabase_client(service_role=True)
+        if sb:
+            # Very lightweight query
+            sb.table('profiles').select('id', count='exact').limit(1).execute()
+            db_status = 'connected'
+        else:
+            db_status = 'disconnected'
+    except Exception as e:
+        db_status = f'error: {str(e)[:50]}'
+    
+    return {
+        'status': 'ok',
+        'timestamp': datetime.utcnow().isoformat() + 'Z',
+        'service': 'bse-monitor',
+        'database': db_status,
+        'memory_mb': get_memory_usage()
+    }, 200
+
+def get_memory_usage():
+    """Get current memory usage in MB"""
+    try:
+        import psutil
+        import os
+        process = psutil.Process(os.getpid())
+        return round(process.memory_info().rss / 1024 / 1024, 2)
+    except Exception:
+        return 'unknown'
+
 @app.route('/')
 @login_required
 def dashboard(sb):

@@ -26,3 +26,28 @@ services:
         value: "60"
       - key: YAHOO_VERBOSE
         value: "0"
+        - key: YAHOO_VERBOSE
+        value: "0"
+      - key: BSE_VERBOSE
+        value: "1"
+  # Cron Jobs
+  - type: cron
+    name: hourly-spike-alerts
+    env: python
+    schedule: "0 3-10 * * 1-5"  # Every hour from 9 AM to 3:30 PM IST (3:30 AM to 10:00 AM UTC), Monday to Friday
+    buildCommand: pip install -r requirements.txt
+    startCommand: curl -f "https://multiuser-bse-monitor.onrender.com/cron/hourly_spike_alerts?key=$CRON_SECRET_KEY" || exit 1
+    envVars:
+      - key: CRON_SECRET_KEY
+        sync: false
+
+  - type: cron
+    name: evening-summary
+    env: python
+    schedule: "0 11 * * 1-5"  # 4:30 PM IST = 11:00 AM UTC (Monday to Friday)
+    buildCommand: pip install -r requirements.txt
+    startCommand: curl -f "https://multiuser-bse-monitor.onrender.com/cron/evening_summary?key=$CRON_SECRET_KEY" || exit 1
+    envVars:
+      - key: CRON_SECRET_KEY
+        sync: false
+

@@ -129,7 +129,9 @@ def cron_runs(sb):
                 if r and r.get('run_id'):  # Ensure r is not None and has run_id
                     grouped[r.get('run_id')].append(r)
             
-            for run_id, items in grouped.items():
+            # Convert to regular dict to avoid any issues with defaultdict.items()
+            grouped_dict = dict(grouped)
+            for run_id, items in grouped_dict.items():
                 if not items:
                     continue
                 # Get job info from first item (avoid complex sorting)

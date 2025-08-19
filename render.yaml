@@ -45,7 +45,7 @@ services:
   - type: cron
     name: evening-summary
     env: python
-    schedule: "20 14 * * 1-5"  # 7:50 PM IST = 2:20 PM UTC (Monday to Friday)
+    schedule: "0 3 * * 1-5"  # 8:30 AM IST = 3:00 AM UTC (Monday to Friday)
     buildCommand: pip install -r requirements.txt
     startCommand: curl -f "https://multiuser-bse-monitor.onrender.com/cron/evening_summary?key=$CRON_SECRET_KEY&force=true" || exit 1
     envVars:
@@ -62,6 +62,7 @@ services:
     envVars:
       - key: CRON_SECRET_KEY
         sync: false
+
 
 
 

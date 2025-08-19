@@ -72,46 +72,93 @@ def cron_runs(sb):
     # Try a robust fetch that works even if ordering fails
     error_msg = None
     try:
-        q = sb.table('cron_run_logs').select('*')
+        # Try to fetch cron run logs with proper error handling
+        rows = []
         try:
-            q = q.order('run_at', desc=True)
-        except Exception:
-            pass
-        rows = q.limit(500).execute().data or []
+            result = sb.table('cron_run_logs').select('*').order('run_at', desc=True).limit(500).execute()
+            if result and hasattr(result, 'data'):
+                potential_rows = result.data
+                # Debug what we actually got
+                if potential_rows is not None:
+                    if isinstance(potential_rows, list):
+                        rows = potential_rows
+                    elif hasattr(potential_rows, '__iter__') and not isinstance(potential_rows, (str, bytes)):
+                        # Try to convert to list if it's iterable but not a string
+                        try:
+                            rows = list(potential_rows)
+                        except Exception:
+                            rows = []
+                    else:
+                        rows = []
+                else:
+                    rows = []
+        except Exception as e1:
+            # Fallback without ordering if that fails
+            try:
+                result = sb.table('cron_run_logs').select('*').limit(500).execute()
+                if result and hasattr(result, 'data') and result.data:
+                    potential_rows = result.data
+                    if isinstance(potential_rows, list):
+                        rows = potential_rows
+                    else:
+                        rows = []
+                else:
+                    rows = []
+            except Exception as e2:
+                rows = []
+                error_msg = f"Query errors: {e1}, {e2}"
+        
+        # Final safety check
+        if not isinstance(rows, list):
+            rows = []
+            
     except Exception as e:
         rows = []
-        error_msg = f"Query error: {e}"
+        error_msg = f"Outer query error: {e}"
 
     try:
         from collections import defaultdict
         grouped = defaultdict(list)
-        for r in rows:
-            grouped[r.get('run_id')].append(r)
         runs = []
-        for run_id, items in grouped.items():
-            if not items:
-                continue
-            # Prefer the newest item's run_at/job
-            items_sorted = sorted(items, key=lambda x: (x.get('user_id') or ''))
-            job = (sorted(items, key=lambda x: str(x.get('run_at') or ''))[-1]).get('job')
-            run_at = (sorted(items, key=lambda x: str(x.get('run_at') or ''))[-1]).get('run_at')
-            total_users = len({i.get('user_id') for i in items if i.get('user_id')})
-            processed_users = sum(1 for i in items if i.get('processed'))
-            skipped_users = sum(1 for i in items if not i.get('processed'))
-            total_notifications = sum(int(i.get('notifications_sent') or 0) for i in items)
-            total_recipients = sum(int(i.get('recipients') or 0) for i in items)
-            runs.append({
-                'run_id': run_id,
-                'run_at': run_at,
-                'job': job,
-                'total_users': total_users,
-                'processed_users': processed_users,
-                'skipped_users': skipped_users,
-                'total_notifications': total_notifications,
-                'total_recipients': total_recipients,
-                'items': items_sorted[:50],
-            })
-        runs = sorted(runs, key=lambda x: str(x.get('run_at') or ''), reverse=True)[:10]
+        
+        # Handle empty rows gracefully
+        if not rows:
+            runs = []
+        else:
+            for r in rows:
+                if r and r.get('run_id'):  # Ensure r is not None and has run_id
+                    grouped[r.get('run_id')].append(r)
+            
+            for run_id, items in grouped.items():
+                if not items:
+                    continue
+                # Prefer the newest item's run_at/job
+                items_sorted = sorted(items, key=lambda x: str(x.get('user_id') or ''))
+                sorted_by_time = sorted(items, key=lambda x: str(x.get('run_at') or ''))
+                if sorted_by_time:
+                    job = sorted_by_time[-1].get('job')
+                    run_at = sorted_by_time[-1].get('run_at')
+                else:
+                    job = 'unknown'
+                    run_at = None
+                    
+                total_users = len({i.get('user_id') for i in items if i.get('user_id')})
+                processed_users = sum(1 for i in items if i.get('processed'))
+                skipped_users = sum(1 for i in items if not i.get('processed'))
+                total_notifications = sum(int(i.get('notifications_sent') or 0) for i in items)
+                total_recipients = sum(int(i.get('recipients') or 0) for i in items)
+                runs.append({
+                    'run_id': run_id,
+                    'run_at': run_at,
+                    'job': job,
+                    'total_users': total_users,
+                    'processed_users': processed_users,
+                    'skipped_users': skipped_users,
+                    'total_notifications': total_notifications,
+                    'total_recipients': total_recipients,
+                    'items': items_sorted[:50],
+                })
+            runs = sorted(runs, key=lambda x: str(x.get('run_at') or ''), reverse=True)[:10]
         if error_msg:
             flash(error_msg, 'warning')
         # Fetch current evening summary time from app_settings
@@ -139,6 +186,82 @@ def set_evening_time(sb):
         flash('Evening summary time updated.', 'success')
     except Exception as e:
         flash(f'Failed to update: {e}', 'error')
+    return redirect(url_for('admin.cron_runs'))
+
+@admin_bp.route('/trigger_cron', methods=['POST'])
+@admin_required
+def trigger_cron(sb):
+    """Manually trigger cron jobs for testing"""
+    import requests
+    import os
+    from datetime import datetime
+    
+    cron_type = request.form.get('cron_type')
+    if not cron_type:
+        flash('Invalid cron type.', 'error')
+        return redirect(url_for('admin.cron_runs'))
+    
+    # Get the base URL and secret key
+    base_url = request.url_root.rstrip('/')
+    secret_key = os.environ.get('CRON_SECRET_KEY')
+    
+    if not secret_key:
+        flash('CRON_SECRET_KEY not configured in environment variables.', 'error')
+        return redirect(url_for('admin.cron_runs'))
+    
+    # Map cron types to endpoints
+    endpoint_map = {
+        'price_spike_alerts': '/cron/hourly_spike_alerts',  # Price spike monitoring
+        'evening_summary': '/cron/evening_summary',         # Evening summary
+        'bse_announcements': '/cron/bse_announcements'      # BSE announcements 24/7
+    }
+    
+    if cron_type not in endpoint_map:
+        flash('Unknown cron type.', 'error')
+        return redirect(url_for('admin.cron_runs'))
+    
+    endpoint = endpoint_map[cron_type]
+    
+    # Build URL with proper parameters
+    if cron_type == 'evening_summary':
+        url = f"{base_url}{endpoint}?key={secret_key}&force=true"
+    else:
+        url = f"{base_url}{endpoint}?key={secret_key}"
+    
+    try:
+        flash(f'Triggering {cron_type.replace("_", " ").title()}... This may take a few minutes.', 'info')
+        
+        # Make the request with a longer timeout
+        response = requests.get(url, timeout=300)  # 5 minute timeout
+        
+        if response.status_code == 200:
+            try:
+                data = response.json()
+                totals = data.get('totals', {})
+                
+                flash(f'✅ {cron_type.replace("_", " ").title()} completed successfully!', 'success')
+                flash(f'📊 Results: {totals.get("users_processed", 0)} users processed, '
+                      f'{totals.get("notifications_sent", 0)} notifications sent, '
+                      f'{totals.get("users_skipped", 0)} users skipped.', 'info')
+                
+            except Exception:
+                flash(f'✅ {cron_type.replace("_", " ").title()} completed (non-JSON response).', 'success')
+                
+        elif response.status_code == 403:
+            flash('❌ Authentication failed. Check CRON_SECRET_KEY.', 'error')
+            
+        else:
+            flash(f'❌ Request failed with status {response.status_code}: {response.text[:200]}', 'error')
+            
+    except requests.exceptions.Timeout:
+        flash(f'⏰ {cron_type.replace("_", " ").title()} is taking longer than expected. Check logs for completion.', 'warning')
+        
+    except requests.exceptions.ConnectionError:
+        flash('🔌 Connection error. Check if the application is running.', 'error')
+        
+    except Exception as e:
+        flash(f'💥 Error triggering {cron_type}: {str(e)}', 'error')
+    
     return redirect(url_for('admin.cron_runs'))
 
 @admin_bp.route('/user/<user_id>')

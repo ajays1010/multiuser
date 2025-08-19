@@ -35,6 +35,10 @@ def log_errors(f):
     return decorated_function
 
 # Global error handlers
+@app.errorhandler(404)
+def not_found_error(error):
+    return {'error': 'Not found', 'message': 'The requested URL was not found on the server.'}, 404
+
 @app.errorhandler(500)
 def internal_error(error):
     github_logger.log_error(error, "Internal Server Error")
@@ -42,6 +46,10 @@ def internal_error(error):
 
 @app.errorhandler(Exception)
 def handle_exception(e):
+    # Don't log 404 errors as exceptions
+    if hasattr(e, 'code') and e.code == 404:
+        return {'error': 'Not found', 'message': 'The requested URL was not found on the server.'}, 404
+    
     github_logger.log_error(e, "Unhandled Exception")
     return {'error': 'Application error', 'details': str(e)}, 500
 
@@ -204,17 +212,18 @@ def cron_bse_announcements():
             if not scrips or not recipients:
                 totals["users_skipped"] += 1
                 try:
+                    # Ensure user_id is a valid UUID
+                    user_uuid = uid if uid and len(uid) == 36 and '-' in uid else None
                     sb.table('cron_run_logs').insert({
-                        'id': str(uuid.uuid4()),
                         'run_id': run_id,
                         'job': job_name,
-                        'user_id': uid,
+                        'user_id': user_uuid,
                         'processed': False,
                         'notifications_sent': 0,
                         'recipients': int(len(recipients)),
                     }).execute()
-                except Exception:
-                    pass
+                except Exception as e:
+                    logging.error(f"Failed to log skipped cron run: {e}")
                 continue
             try:
                 # Decide which job to run based on path
@@ -230,24 +239,26 @@ def cron_bse_announcements():
                         # Skip if before or during market hours unless forced
                         sent = 0
                     else:
-                        sent = db.send_bse_announcements_consolidated(sb, uid, scrips, recipients, hours_back=24)
+                        # Send price summary instead of announcements
+                        sent = db.send_script_messages_to_telegram(sb, uid, scrips, recipients)
                 else:
                     sent = db.send_bse_announcements_consolidated(sb, uid, scrips, recipients, hours_back=hours_back)
                 totals["users_processed"] += 1
                 totals["notifications_sent"] += sent
                 totals["recipients"] += len(recipients)
                 try:
+                    # Ensure user_id is a valid UUID
+                    user_uuid = uid if uid and len(uid) == 36 and '-' in uid else None
                     sb.table('cron_run_logs').insert({
-                        'id': str(uuid.uuid4()),
                         'run_id': run_id,
                         'job': job_name,
-                        'user_id': uid,
+                        'user_id': user_uuid,
                         'processed': True,
                         'notifications_sent': int(sent),
                         'recipients': int(len(recipients)),
                     }).execute()
-                except Exception:
-                    pass
+                except Exception as e:
+                    logging.error(f"Failed to log cron run: {e}")
                 # We do not know exact items here, but we can log via BSE_VERBOSE in the function
             except Exception as e:
                 errors.append({"user_id": uid, "error": str(e)})
@@ -298,6 +309,47 @@ def health_check():
         'database': db_status,
         'memory_mb': get_memory_usage()
     }, 200
+
+@app.route('/debug/cron_auth')
+def debug_cron_auth():
+    """Debug endpoint to check cron authentication"""
+    key = request.args.get('key')
+    expected = os.environ.get('CRON_SECRET_KEY')
+    
+    return {
+        'provided_key': key,
+        'expected_key': expected,
+        'keys_match': key == expected,
+        'expected_exists': expected is not None,
+        'provided_exists': key is not None,
+        'expected_length': len(expected) if expected else 0,
+        'provided_length': len(key) if key else 0
+    }
+
+@app.route('/debug/user_setup')
+@login_required
+def debug_user_setup(sb):
+    """Debug endpoint to check user's setup"""
+    user_id = session.get('user_id')
+    
+    # Get user's monitored scrips
+    monitored_scrips = db.get_user_scrips(sb, user_id)
+    
+    # Get user's recipients
+    recipients = db.get_user_recipients(sb, user_id)
+    
+    # Get user's category preferences
+    category_prefs = db.get_user_category_prefs(sb, user_id)
+    
+    return {
+        'user_id': user_id,
+        'monitored_scrips': monitored_scrips,
+        'recipients': recipients,
+        'category_preferences': category_prefs,
+        'scrip_count': len(monitored_scrips),
+        'recipient_count': len(recipients),
+        'category_count': len(category_prefs)
+    }
 
 def get_memory_usage():
     """Get current memory usage in MB"""

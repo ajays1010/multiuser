@@ -530,10 +530,14 @@ def get_user_category_prefs(user_client, user_id: str):
             user_client.table('bse_category_prefs')
             .select('categories')
             .eq('user_id', user_id)
-            .single()
+            .limit(1)
             .execute()
         )
-        cats = (resp.data or {}).get('categories') if hasattr(resp, 'data') else None
+        # Handle case where no record exists
+        if not resp.data:
+            return list(ALLOWED_ANNOUNCEMENT_CATEGORIES)
+        
+        cats = resp.data[0].get('categories') if resp.data else None
         if not cats:
             return list(ALLOWED_ANNOUNCEMENT_CATEGORIES)
         # Ensure only known categories are returned
@@ -1373,6 +1377,18 @@ def send_script_messages_to_telegram(user_client, user_id: str, monitored_scrips
             cmp_price, prev_close, _src = get_cmp_and_prev(symbol)
             current_price = cmp_price if cmp_price is not None else 'N/A'
 
+            # Calculate percentage change
+            pct_change = None
+            change_str = ""
+            if cmp_price is not None and prev_close is not None and prev_close != 0:
+                try:
+                    pct_change = ((cmp_price - prev_close) / prev_close) * 100.0
+                    arrow = "🔼" if pct_change > 0 else ("🔻" if pct_change < 0 else "➖")
+                    sign = "+" if pct_change > 0 else ""
+                    change_str = f" {arrow} ({sign}{pct_change:.2f}%)"
+                except Exception:
+                    pass
+
             # Moving averages from daily history via chart API (cached)
             ma_50 = 'N/A'
             ma_200 = 'N/A'
@@ -1399,8 +1415,10 @@ def send_script_messages_to_telegram(user_client, user_id: str, monitored_scrips
             except Exception:
                 pass
 
-            lines.append(f"  - Price: {safe_fmt(current_price)} {indicator}")
+            lines.append(f"  - Price: {safe_fmt(current_price)}{change_str} {indicator}")
             lines.append(f"  - MA50: {safe_fmt(ma_50)} | MA200: {safe_fmt(ma_200)}")
+            if prev_close is not None:
+                lines.append(f"  - Previous Close: {safe_fmt(prev_close)}")
             lines.append("")
 
         if failed_symbols:

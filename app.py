@@ -351,6 +351,108 @@ def debug_user_setup(sb):
         'category_count': len(category_prefs)
     }
 
+@app.route('/debug/cron_logs')
+def debug_cron_logs():
+    """Debug endpoint to check recent cron job runs"""
+    try:
+        sb = db.get_supabase_client(service_role=True)
+        if not sb:
+            return {'error': 'Supabase not configured'}, 500
+        
+        # Get recent cron runs (last 50, ordered by created_at desc)
+        result = sb.table('cron_run_logs').select('*').order('created_at', desc=True).limit(50).execute()
+        
+        return {
+            'success': True,
+            'total_runs': len(result.data),
+            'recent_runs': result.data
+        }
+    except Exception as e:
+        return {'error': str(e)}, 500
+
+@app.route('/test/evening_summary')
+def test_evening_summary():
+    """Test endpoint to manually trigger evening summary without secret key"""
+    try:
+        sb = db.get_supabase_client(service_role=True)
+        if not sb:
+            return {'error': 'Supabase not configured'}, 500
+        
+        # Force run evening summary for all users
+        from datetime import datetime
+        import uuid
+        
+        run_id = str(uuid.uuid4())
+        job_name = 'evening_summary_test'
+        
+        # Get all users with scrips and recipients
+        scrip_rows = sb.table('monitored_scrips').select('user_id, bse_code, company_name').execute().data or []
+        rec_rows = sb.table('telegram_recipients').select('user_id, chat_id').execute().data or []
+        
+        # Build maps by user
+        scrips_by_user = {}
+        for r in scrip_rows:
+            uid = r.get('user_id')
+            if not uid:
+                continue
+            scrips_by_user.setdefault(uid, []).append({'bse_code': r.get('bse_code'), 'company_name': r.get('company_name')})
+
+        recs_by_user = {}
+        for r in rec_rows:
+            uid = r.get('user_id')
+            if not uid:
+                continue
+            recs_by_user.setdefault(uid, []).append({'chat_id': r.get('chat_id')})
+
+        users_processed = 0
+        notifications_sent = 0
+        users_skipped = 0
+        errors = []
+
+        for uid, scrips in scrips_by_user.items():
+            recipients = recs_by_user.get(uid) or []
+            if not scrips or not recipients:
+                users_skipped += 1
+                continue
+            try:
+                # Send price summary instead of announcements
+                sent = db.send_script_messages_to_telegram(sb, uid, scrips, recipients)
+                users_processed += 1
+                notifications_sent += sent
+                
+                # Log the run
+                try:
+                    user_uuid = uid if uid and len(uid) == 36 and '-' in uid else None
+                    sb.table('cron_run_logs').insert({
+                        'run_id': run_id,
+                        'job': job_name,
+                        'user_id': user_uuid,
+                        'processed': True,
+                        'notifications_sent': int(sent),
+                        'recipients': int(len(recipients)),
+                    }).execute()
+                except Exception as e:
+                    errors.append(f"Failed to log for user {uid}: {e}")
+                    
+            except Exception as e:
+                errors.append({"user_id": uid, "error": str(e)})
+                users_skipped += 1
+
+        return {
+            'success': True,
+            'run_id': run_id,
+            'job': job_name,
+            'timestamp': datetime.now().isoformat(),
+            'totals': {
+                'users_processed': users_processed,
+                'users_skipped': users_skipped,
+                'notifications_sent': notifications_sent,
+                'errors': errors
+            }
+        }
+    except Exception as e:
+        return {'error': str(e)}, 500
+
 def get_memory_usage():
     """Get current memory usage in MB"""
     try:

@@ -75,7 +75,7 @@ def cron_runs(sb):
         # Try to fetch cron run logs with proper error handling
         rows = []
         try:
-            result = sb.table('cron_run_logs').select('*').order('run_at', desc=True).limit(500).execute()
+            result = sb.table('cron_run_logs').select('*').order('created_at', desc=True).limit(500).execute()
             if result and hasattr(result, 'data'):
                 potential_rows = result.data
                 # Debug what we actually got
@@ -132,12 +132,12 @@ def cron_runs(sb):
             for run_id, items in grouped.items():
                 if not items:
                     continue
-                # Prefer the newest item's run_at/job
+                # Prefer the newest item's created_at/job
                 items_sorted = sorted(items, key=lambda x: str(x.get('user_id') or ''))
-                sorted_by_time = sorted(items, key=lambda x: str(x.get('run_at') or ''))
+                sorted_by_time = sorted(items, key=lambda x: str(x.get('created_at') or ''))
                 if sorted_by_time:
                     job = sorted_by_time[-1].get('job')
-                    run_at = sorted_by_time[-1].get('run_at')
+                    run_at = sorted_by_time[-1].get('created_at')
                 else:
                     job = 'unknown'
                     run_at = None

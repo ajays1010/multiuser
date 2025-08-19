@@ -24,8 +24,6 @@ services:
         sync: false
       - key: YAHOO_CACHE_TTL
         value: "60"
-      - key: YAHOO_VERBOSE
-        value: "0"
         - key: YAHOO_VERBOSE
         value: "0"
       - key: BSE_VERBOSE
@@ -64,5 +62,6 @@ services:
     envVars:
       - key: CRON_SECRET_KEY
         sync: false
+
 
 

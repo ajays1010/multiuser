@@ -359,8 +359,8 @@ def debug_cron_logs():
         if not sb:
             return {'error': 'Supabase not configured'}, 500
         
-        # Get recent cron runs (last 50, ordered by created_at desc)
-        result = sb.table('cron_run_logs').select('*').order('created_at', desc=True).limit(50).execute()
+        # Get recent cron runs (last 50, ordered by id desc since created_at doesn't exist)
+        result = sb.table('cron_run_logs').select('*').order('id', desc=True).limit(50).execute()
         
         return {
             'success': True,

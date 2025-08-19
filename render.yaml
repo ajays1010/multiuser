@@ -30,17 +30,20 @@ services:
         value: "0"
       - key: BSE_VERBOSE
         value: "1"
-  # Cron Jobs
+    # Cron Jobs
+  
+  # 1. Price Spike Monitoring (Every 5 minutes during market hours)
   - type: cron
-    name: hourly-spike-alerts
+    name: price-spike-monitor
     env: python
-    schedule: "0 3-10 * * 1-5"  # Every hour from 9 AM to 3:30 PM IST (3:30 AM to 10:00 AM UTC), Monday to Friday
+    schedule: "*/5 3-10 * * 1-5"  # Every 5 minutes from 9:00 AM to 3:30 PM IST (3:30 AM to 10:00 AM UTC), Monday to Friday
     buildCommand: pip install -r requirements.txt
     startCommand: curl -f "https://multiuser-bse-monitor.onrender.com/cron/hourly_spike_alerts?key=$CRON_SECRET_KEY" || exit 1
     envVars:
       - key: CRON_SECRET_KEY
         sync: false
 
+  # 2. Evening Summary (Once daily at 4:30 PM IST)
   - type: cron
     name: evening-summary
     env: python
@@ -51,3 +54,13 @@ services:
       - key: CRON_SECRET_KEY
         sync: false
 
+  # 3. BSE Announcements Monitoring (Every 5 minutes, 24/7)
+  - type: cron
+    name: bse-announcements-monitor
+    env: python
+    schedule: "*/5 * * * *"  # Every 5 minutes, 24 hours a day, 7 days a week
+    buildCommand: pip install -r requirements.txt
+    startCommand: curl -f "https://multiuser-bse-monitor.onrender.com/cron/bse_announcements?key=$CRON_SECRET_KEY" || exit 1
+    envVars:
+      - key: CRON_SECRET_KEY
+        sync: false

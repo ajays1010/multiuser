@@ -132,12 +132,11 @@ def cron_runs(sb):
             for run_id, items in grouped.items():
                 if not items:
                     continue
-                # Prefer the newest item's id/job (since created_at doesn't exist)
+                # Get job info from first item (avoid complex sorting)
                 items_sorted = sorted(items, key=lambda x: str(x.get('user_id') or ''))
-                sorted_by_time = sorted(items, key=lambda x: int(x.get('id') or 0), reverse=True)
-                if sorted_by_time:
-                    job = sorted_by_time[0].get('job')
-                    run_at = sorted_by_time[0].get('id')  # Use id as timestamp proxy
+                if items:
+                    job = items[0].get('job', 'unknown')
+                    run_at = items[0].get('id', 'N/A')  # Use id as identifier
                 else:
                     job = 'unknown'
                     run_at = None

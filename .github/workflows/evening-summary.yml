@@ -1,0 +1,37 @@
+name: Evening Summary Cron Job                                                                                      │
+│                                                                                                                      │
+│  on:                                                                                                                 │
+│    schedule:                                                                                                         │
+│      # Run at 16:00 IST (10:30 AM UTC) Monday to Friday                                                              │
+│      - cron: '30 10 * * 1-5'                                                                                         │
+│    workflow_dispatch: # Allow manual triggering                                                                      │
+│                                                                                                                      │
+│  jobs:                                                                                                               │
+│    evening-summary:                                                                                                  │
+│      runs-on: ubuntu-latest                                                                                          │
+│      steps:                                                                                                          │
+│        - name: Trigger Evening Summary                                                                               │
+│          run: |                                                                                                      │
+│            response=$(curl -s -w "%{http_code}" -o response.json \                                                   │
+│              "https://multiuser-bse-monitor.onrender.com/force/evening_summary?key=${{ secrets.CRON_SECRET_KEY }}")  │
+│                                                                                                                      │
+│            echo "HTTP Status: $response"                                                                             │
+│            echo "Response:"                                                                                          │
+│            cat response.json                                                                                         │
+│                                                                                                                      │
+│            # Check if request was successful                                                                         │
+│            if [ "$response" -eq 200 ]; then                                                                          │
+│              echo "✅ Evening summary triggered successfully"                                                        │
+│            else                                                                                                      │
+│              echo "❌ Evening summary failed with status $response"                                                  │
+│              exit 1                                                                                                  │
+│            fi                                                                                                        │
+│                                                                                                                      │
+│        - name: Log Results                                                                                           │
+│          if: always()                                                                                                │
+│          run: |                                                                                                      │
+│            echo "Evening summary job completed at $(date)"                                                           │
+│            if [ -f response.json ]; then                                                                             │
+│              echo "Full response:"                                                                                   │
+│              cat response.json | jq '.' || cat response.json                                                         │
+│            fi

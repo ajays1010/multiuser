@@ -453,6 +453,184 @@ def test_evening_summary():
     except Exception as e:
         return {'error': str(e)}, 500
 
+@app.route('/monitor/cron_status')
+def monitor_cron_status():
+    """Monitoring dashboard for cron job status and recent runs"""
+    try:
+        sb = db.get_supabase_client(service_role=True)
+        if not sb:
+            return {'error': 'Supabase not configured'}, 500
+        
+        from datetime import datetime, timedelta
+        
+        # Get recent cron runs (last 24 hours)
+        result = sb.table('cron_run_logs').select('*').order('id', desc=True).limit(100).execute()
+        
+        # Analyze the data
+        runs_by_job = {}
+        total_notifications = 0
+        total_users = 0
+        recent_errors = []
+        
+        for run in result.data:
+            job = run.get('job', 'unknown')
+            if job not in runs_by_job:
+                runs_by_job[job] = {
+                    'total_runs': 0,
+                    'successful_runs': 0,
+                    'total_notifications': 0,
+                    'total_users': 0,
+                    'last_run': None,
+                    'recent_runs': []
+                }
+            
+            runs_by_job[job]['total_runs'] += 1
+            runs_by_job[job]['recent_runs'].append(run)
+            
+            if run.get('processed'):
+                runs_by_job[job]['successful_runs'] += 1
+                runs_by_job[job]['total_notifications'] += run.get('notifications_sent', 0)
+                runs_by_job[job]['total_users'] += 1
+            
+            # Track the most recent run for each job
+            if not runs_by_job[job]['last_run']:
+                runs_by_job[job]['last_run'] = run
+        
+        # Calculate summary stats
+        for job_data in runs_by_job.values():
+            total_notifications += job_data['total_notifications']
+            total_users += job_data['total_users']
+            # Keep only last 10 runs for each job
+            job_data['recent_runs'] = job_data['recent_runs'][:10]
+        
+        # Get current IST time and market status
+        ist_now = db.ist_now()
+        is_market_open, market_open_time, market_close_time = db.ist_market_window()
+        
+        return {
+            'success': True,
+            'timestamp': datetime.now().isoformat(),
+            'ist_time': ist_now.isoformat(),
+            'market_status': {
+                'is_open': is_market_open,
+                'open_time': market_open_time.isoformat() if market_open_time else None,
+                'close_time': market_close_time.isoformat() if market_close_time else None
+            },
+            'summary': {
+                'total_jobs': len(runs_by_job),
+                'total_notifications_sent': total_notifications,
+                'total_user_runs': total_users,
+                'total_runs_analyzed': len(result.data)
+            },
+            'jobs': runs_by_job,
+            'quick_links': {
+                'test_evening_summary': '/test/evening_summary',
+                'debug_cron_logs': '/debug/cron_logs',
+                'debug_cron_auth': '/debug/cron_auth',
+                'health_check': '/health'
+            }
+        }
+    except Exception as e:
+        return {'error': str(e)}, 500
+
+@app.route('/force/evening_summary')
+def force_evening_summary():
+    """Force trigger evening summary bypassing all timing restrictions"""
+    key = request.args.get('key')
+    expected = os.environ.get('CRON_SECRET_KEY')
+    if not expected or key != expected:
+        return "Unauthorized - Use: /force/evening_summary?key=YOUR_CRON_SECRET_KEY", 403
+    
+    try:
+        sb = db.get_supabase_client(service_role=True)
+        if not sb:
+            return {'error': 'Supabase not configured'}, 500
+        
+        from datetime import datetime
+        import uuid
+        
+        run_id = str(uuid.uuid4())
+        job_name = 'evening_summary_forced'
+        
+        # Get all users with scrips and recipients
+        scrip_rows = sb.table('monitored_scrips').select('user_id, bse_code, company_name').execute().data or []
+        rec_rows = sb.table('telegram_recipients').select('user_id, chat_id').execute().data or []
+        
+        # Build maps by user
+        scrips_by_user = {}
+        for r in scrip_rows:
+            uid = r.get('user_id')
+            if not uid:
+                continue
+            scrips_by_user.setdefault(uid, []).append({'bse_code': r.get('bse_code'), 'company_name': r.get('company_name')})
+
+        recs_by_user = {}
+        for r in rec_rows:
+            uid = r.get('user_id')
+            if not uid:
+                continue
+            recs_by_user.setdefault(uid, []).append({'chat_id': r.get('chat_id')})
+
+        users_processed = 0
+        notifications_sent = 0
+        users_skipped = 0
+        errors = []
+
+        print(f"FORCE EVENING SUMMARY: Processing {len(scrips_by_user)} users...")
+
+        for uid, scrips in scrips_by_user.items():
+            recipients = recs_by_user.get(uid) or []
+            if not scrips or not recipients:
+                users_skipped += 1
+                continue
+            try:
+                # FORCE send price summary - bypass all timing checks
+                sent = db.send_script_messages_to_telegram(sb, uid, scrips, recipients)
+                users_processed += 1
+                notifications_sent += sent
+                print(f"  User {uid}: sent {sent} notifications")
+                
+                # Log the run
+                try:
+                    user_uuid = uid if uid and len(uid) == 36 and '-' in uid else None
+                    sb.table('cron_run_logs').insert({
+                        'run_id': run_id,
+                        'job': job_name,
+                        'user_id': user_uuid,
+                        'processed': True,
+                        'notifications_sent': int(sent),
+                        'recipients': int(len(recipients)),
+                    }).execute()
+                except Exception as e:
+                    errors.append(f"Failed to log for user {uid}: {e}")
+                    
+            except Exception as e:
+                errors.append({"user_id": uid, "error": str(e)})
+                users_skipped += 1
+                print(f"  ERROR User {uid}: {e}")
+
+        result = {
+            'success': True,
+            'forced': True,
+            'run_id': run_id,
+            'job': job_name,
+            'timestamp': datetime.now().isoformat(),
+            'ist_time': db.ist_now().isoformat(),
+            'totals': {
+                'users_processed': users_processed,
+                'users_skipped': users_skipped,
+                'notifications_sent': notifications_sent,
+                'errors': errors
+            }
+        }
+        
+        print(f"FORCE EVENING SUMMARY COMPLETE: {result}")
+        return result
+        
+    except Exception as e:
+        print(f"FORCE EVENING SUMMARY ERROR: {e}")
+        return {'error': str(e)}, 500
+
 def get_memory_usage():
     """Get current memory usage in MB"""
     try:

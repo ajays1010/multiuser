@@ -1,0 +1,29 @@
+name: Price Spike Monitor
+
+on:
+  schedule:
+    # Every 5 minutes from 3:30 AM to 10:00 AM UTC (9:00 AM to 3:30 PM IST) Monday to Friday
+    - cron: '*/5 3-10 * * 1-5'
+  workflow_dispatch: # Allow manual triggering
+
+jobs:
+  price-spike-monitor:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Price Spike Monitor
+        run: |
+          response=$(curl -s -w "%{http_code}" -o response.json \
+            "https://multiuser-bse-monitor.onrender.com/cron/hourly_spike_alerts?key=${{ secrets.CRON_SECRET_KEY }}")
+          
+          echo "HTTP Status: $response"
+          
+          # Check if request was successful
+          if [ "$response" -eq 200 ]; then
+            echo "✅ Price spike monitor completed successfully"
+            # Show summary without full response to avoid log spam
+            cat response.json | jq '.ok, .users_processed, .notifications_sent' 2>/dev/null || echo "Response received"
+          else
+            echo "❌ Price spike monitor failed with status $response"
+            cat response.json
+            exit 1
+          fi

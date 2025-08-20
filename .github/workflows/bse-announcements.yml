@@ -1,0 +1,29 @@
+name: BSE Announcements Monitor
+
+on:
+  schedule:
+    # Every 5 minutes, 24/7
+    - cron: '*/5 * * * *'
+  workflow_dispatch: # Allow manual triggering
+
+jobs:
+  bse-announcements:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger BSE Announcements Monitor
+        run: |
+          response=$(curl -s -w "%{http_code}" -o response.json \
+            "https://multiuser-bse-monitor.onrender.com/cron/bse_announcements?key=${{ secrets.CRON_SECRET_KEY }}")
+          
+          echo "HTTP Status: $response"
+          
+          # Check if request was successful
+          if [ "$response" -eq 200 ]; then
+            echo "✅ BSE announcements monitor completed successfully"
+            # Show summary without full response to avoid log spam
+            cat response.json | jq '.ok, .users_processed, .notifications_sent' 2>/dev/null || echo "Response received"
+          else
+            echo "❌ BSE announcements monitor failed with status $response"
+            cat response.json
+            exit 1
+          fi
